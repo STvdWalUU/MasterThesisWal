@@ -32,7 +32,6 @@ namespace SA_ILP
             this.TWEnd = twend;
             this.ServiceTime = serviceTime;
             this.Elevation = elevation;
-
         }
 
         public Customer(Customer cust)

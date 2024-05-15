@@ -6,6 +6,7 @@ using CommandLine;
 using System.Text;
 using MathNet.Numerics.Distributions;
 using System.Reflection;
+using System.Collections.ObjectModel;
 
 string baseDir = "../../../../../";
 
@@ -31,18 +32,30 @@ if (args.Length >= 1)
     if (opts == null)
         return;
 
-
-    String solutionDir = Path.Join(opts.SolutionDir, DateTime.Now.ToString("dd-MM-yy_HH-mm-ss") + opts.TestName);
+    
+    //String baseSaveDirectory = "/Users/stijnvanderwal/Documents/GitHub/SA-ILP_new/SA-ILP/SA-ILP/Test8Maa";
+    String baseSaveDirectory = "/Users/stijnvanderwal/Documents/GitHub/Data";
+    //String baseSaveDirectory = "/Users/stijnvanderwal/Documents/GitHub/Simulator";
+    String solutionDir = baseSaveDirectory + "/FinalSchedules";
+    //Path.Join(opts.SolutionDir, DateTime.Now.ToString("dd-MM-yy_HH-mm-ss") + opts.TestName);
     String benchDir = Path.Join("Benchmarks", DateTime.Now.ToString("dd-MM-yy_HH-mm-ss") + opts.TestName);
-    if (opts.Mode == "vrpltt")
+    // Here we need the directory in which we can find the txtfiles
+    //String ObservationsDirectory = baseSaveDirectory + "/Test19Mrt/TXTfiles";
+    String ObservationsDirectory = "/Users/stijnvanderwal/Documents/GitHub/Data/TXTfilesFullETT";
+
+    if (opts.Mode == "vrpltt") //this does both SA and ILP
     {
         solver.SolveVRPLTTInstance(opts.Instance, numLoadLevels: opts.NumLoadLevels, numIterations: opts.Iterations, timelimit: opts.TimeLimitLS * 1000, bikeMinMass: opts.BikeMinWeight, bikeMaxMass: opts.BikeMaxWeight, inputPower: opts.BikePower);
 
     }
+    else if (opts.Mode == "vrplttKDE") //this does both SA and ILP
+    {
+        solver.SolveVRPLTTInstanceKDE(opts.Instance, KDEdata.ObservationsMatrix, numLoadLevels: opts.NumLoadLevels, numIterations: opts.Iterations, timelimit: opts.TimeLimitLS * 1000, bikeMinMass: opts.BikeMinWeight, bikeMaxMass: opts.BikeMaxWeight, inputPower: opts.BikePower);
+    }
     else if (opts.Mode == "vrptw")
     {
+        // this does only SA
         solver.SolveSolomonInstance(opts.Instance, numIterations: opts.Iterations, timeLimit: opts.TimeLimitLS * 1000);
-
     }
     else if (opts.Mode == "vrplttmt")
     {
@@ -51,24 +64,78 @@ if (args.Length >= 1)
     else if (opts.Mode == "vrptwmt")
     {
         await solver.SolveSolomonInstanceAsync(opts.Instance, numIterations: opts.Iterations, timeLimit: opts.TimeLimitLS * 1000, numStarts: opts.NumStarts, numThreads: opts.NumThreads);
-
     }
     else if (opts.Mode == "allvrpltt")
     {
-
         if (opts.Config != "")
         {
-
             PropertyInfo propertyInfo = typeof(LocalSearchConfigs).GetProperty(opts.Config);
             LocalSearchConfiguration something = (LocalSearchConfiguration)propertyInfo.GetValue(null, null);
-            await Tests.RunVRPLTTTests(opts.Instance, solutionDir, opts.NumRepeats, opts, something);
+            await Tests.RunVRPLTTTests(baseSaveDirectory + opts.Instance, solutionDir, opts.NumRepeats, opts, something);
         }
         else
         {
-            await Tests.RunVRPLTTTests(opts.Instance, solutionDir, opts.NumRepeats, opts);
+            await Tests.RunVRPLTTTests(baseSaveDirectory + opts.Instance, solutionDir, opts.NumRepeats, opts);
         }
-
-
+    }
+    else if (opts.Mode == "allvrplttKDE")
+    {
+        if (opts.Config != "")
+        {
+            PropertyInfo propertyInfo = typeof(LocalSearchConfigs).GetProperty(opts.Config);
+            LocalSearchConfiguration something = (LocalSearchConfiguration)propertyInfo.GetValue(null, null);
+            await Tests.RunVRPLTTTestsKDE(baseSaveDirectory+ opts.Instance, ObservationsDirectory, solutionDir, opts.NumRepeats, opts, something);
+        }
+        else
+        {
+            await Tests.RunVRPLTTTestsKDE(opts.Instance, ObservationsDirectory, solutionDir, opts.NumRepeats, opts);
+        }
+    }
+    else if (opts.Mode == "KDETests")
+    {
+        /*
+        MAKE SURE THE "baseSaveDirectory" IS SET CORRECTLY AND ALL FOLDERS ARE IN THE SAME DIRECTORY
+        */
+        if (opts.Config != "")
+        {
+            PropertyInfo propertyInfo = typeof(LocalSearchConfigs).GetProperty(opts.Config);
+            LocalSearchConfiguration something = (LocalSearchConfiguration)propertyInfo.GetValue(null, null);
+            await Tests.KDETesting(baseSaveDirectory + opts.Instance, ObservationsDirectory, solutionDir, opts.NumRepeats, opts, something);
+        }
+        else
+        {
+            await Tests.KDETesting(opts.Instance, ObservationsDirectory, solutionDir, opts.NumRepeats, opts);
+        }
+    }
+    else if (opts.Mode == "KDETestParams")
+    {
+        /*
+        MAKE SURE THE "baseSaveDirectory" IS SET CORRECTLY AND ALL FOLDERS ARE IN THE SAME DIRECTORY
+        */
+        opts.TimeLimitILP = 10;
+        if (opts.Config != "")
+        {
+            PropertyInfo propertyInfo = typeof(LocalSearchConfigs).GetProperty(opts.Config);
+            LocalSearchConfiguration something = (LocalSearchConfiguration)propertyInfo.GetValue(null, null);
+            await Tests.KDETestingParams(baseSaveDirectory + opts.Instance, ObservationsDirectory, solutionDir, opts.NumRepeats, opts, something);
+        }
+        else
+        {
+            await Tests.KDETestingParams(opts.Instance, ObservationsDirectory, solutionDir, opts.NumRepeats, opts);
+        }
+    }
+    else if (opts.Mode == "KDETestWithWeights")
+    {
+        if (opts.Config != "")
+        {
+            PropertyInfo propertyInfo = typeof(LocalSearchConfigs).GetProperty(opts.Config);
+            LocalSearchConfiguration something = (LocalSearchConfiguration)propertyInfo.GetValue(null, null);
+            await Tests.KDETestingWithWeights(opts.Instance, ObservationsDirectory, solutionDir, opts.NumRepeats, opts, something);
+        }
+        else
+        {
+            await Tests.KDETestingWithWeights(opts.Instance, ObservationsDirectory, solutionDir, opts.NumRepeats, opts);
+        }
     }
     else if (opts.Mode == "allvrpsltt")
     {
@@ -76,7 +143,7 @@ if (args.Length >= 1)
     }
     else if (opts.Mode == "allvrplttWind")
     {
-        await Tests.RunVRPLTTWindtests(opts.Instance, solutionDir, opts.NumRepeats, opts);
+        await Tests.RunVRPLTTWindtests(baseSaveDirectory+ opts.Instance, solutionDir, opts.NumRepeats, opts);
     }
     else if (opts.Mode == "allvrp")
     {
@@ -259,7 +326,7 @@ class Options
     [Value(1, MetaName = "instance", HelpText = "Path to instance")]
     public string Instance { get; set; }
 
-    [Option("iterations", Default = 50000000, HelpText = "LS timelimit.")]
+    [Option("iterations", Default = 50000000, HelpText = "LS iteration limit.")]
     public int Iterations { get; set; }
 
     [Option("threads", Default = 4, HelpText = "Number of threads in multithreaded modes.")]
@@ -291,10 +358,10 @@ class Options
     [Option("testname", Default = "", HelpText = "Name of the test currently ran")]
     public string TestName { get; set; }
 
-    [Option("solutiondir", Default = "Solutions", HelpText = "Name of the test currently ran")]
+    [Option("solutiondir", Default = "Solutions", HelpText = "Directory for solutions files")]
     public string SolutionDir { get; set; }
 
-    [Option("config", Default = "", HelpText = "Name of the test currently ran")]
+    [Option("config", Default = "", HelpText = "The configuration of LS settings")]
     public string Config { get; set; }
     public override string ToString()
     {

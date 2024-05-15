@@ -2,6 +2,8 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Diagnostics.Tracing;
+using System.IO.Enumeration;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
@@ -13,6 +15,7 @@ namespace SA_ILP
         static Solver solver = new Solver();
         public static async Task RunVRPLTTTests(string dir, string solDir, int numRepeats, Options opts,LocalSearchConfiguration? configInput = null)
         {
+            // this is run during mode 'allvrpltt'
             Console.WriteLine("Testing on all vrpltt instances");
             if (!Directory.Exists(solDir))
                 Directory.CreateDirectory(solDir);
@@ -23,12 +26,10 @@ namespace SA_ILP
                 totalWriter.WriteLine(opts.ToString());
                 LocalSearchConfiguration config;
                 
-                
                 if(configInput == null)
                  config = LocalSearchConfigs.VRPLTTFinal;
                 else
                     config = (LocalSearchConfiguration)configInput;
-
 
                 totalWriter.WriteLine("Config:");
                 totalWriter.WriteLine(config);
@@ -42,16 +43,21 @@ namespace SA_ILP
                     {
                         Console.WriteLine($"Testing on { Path.GetFileNameWithoutExtension(file)}");
                         double totalValue = 0.0;
-                        bool newInstance = false;
+                        //bool newInstance = false;
                         
                         if (Path.GetExtension(file) != ".csv")
                             continue;
 
                         for (int i = 0; i < numRepeats; i++)
                         {
-
+                            string fileNameNow = Path.Join(solDir, Path.GetFileNameWithoutExtension(file) + $"_NoWind_{i}.txt");
+                            if (File.Exists(fileNameNow))
+                            {
+                                Console.WriteLine($"Already done {fileNameNow}");
+                                //continue;
+                            }
                             (bool failed, List<Route> ilpSol, double ilpVal, double ilpTime, double lsTime, double lsVal, string solutionJSON) = await solver.SolveVRPLTTInstanceAsync(file, numLoadLevels: opts.NumLoadLevels, numIterations: opts.Iterations, timelimit: opts.TimeLimitLS * 1000, bikeMinMass: opts.BikeMinWeight, bikeMaxMass: opts.BikeMaxWeight, inputPower: opts.BikePower, numStarts: opts.NumStarts, numThreads: opts.NumThreads, config: config,ilpTimelimit:opts.TimeLimitILP);//solver.SolveSolomonInstanceAsync(file, numThreads: numThreads, numIterations: numIterations, timeLimit: 30 * 1000);
-                            using (var writer = new StreamWriter(Path.Join(solDir, Path.GetFileNameWithoutExtension(file) + $"_{i}.txt")))
+                            using (var writer = new StreamWriter(fileNameNow))
                             {
                                 if (failed)
                                     writer.Write("FAIL did not meet check");
@@ -65,7 +71,6 @@ namespace SA_ILP
                             if (failed)
                                 totalWriter.Write("FAIL did not meet check");
 
-
                             totalValue += ilpVal;
 
                             totalWriter.WriteLine($"Instance: { Path.GetFileNameWithoutExtension(file)},Early arrival allowed {config.AllowDeterministicEarlyArrival}, Score: {Math.Round(ilpVal, 3)}, Vehicles: {ilpSol.Count}, ilpTime: {Math.Round(ilpTime, 3)}, lsTime: {Math.Round(lsTime, 3)}, lsVal: {Math.Round(lsVal, 3)}, ilpImp: {Math.Round((lsVal - ilpVal) / lsVal * 100, 3)}%");
@@ -77,7 +82,387 @@ namespace SA_ILP
                 }
             }
         }
+        public static async Task RunVRPLTTTestsKDE(string CSVdirectory, string ObservationsDirectory, string solDir, int numRepeats, Options opts,LocalSearchConfiguration? configInput = null)
+        {
+            // this function needs to match .csv files with .txt files in order to 
+            // get customers from csv and the distances from the txt
+            // this is run during mode 'allvrplttkde'
+            Console.WriteLine("......Testing on all vrpltt instances......");
+            if (!Directory.Exists(solDir))
+                Directory.CreateDirectory(solDir);
 
+            using (var totalWriter = new StreamWriter(Path.Join(solDir, $"allSolutionsVRPLTT{opts.TestName}.txt")))
+            {
+                totalWriter.WriteLine("Command line arguments:");
+                totalWriter.WriteLine(opts.ToString());
+                LocalSearchConfiguration config;
+                
+                if(configInput == null)
+                 config = LocalSearchConfigs.VRPLTTFinal;
+                else
+                    config = (LocalSearchConfiguration)configInput;
+
+                totalWriter.WriteLine("Config:");
+                totalWriter.WriteLine(config);
+                totalWriter.Flush();
+                using (var csvWriter = new StreamWriter(Path.Join(solDir, $"allSolutionsVRPLTT{opts.TestName}.csv")))
+                {
+                    csvWriter.WriteLine("SEP=;");
+                    csvWriter.WriteLine("Instance;AllowWaiting;Score;N;ILP time;LS time;LS score;ILP imp(%)");
+
+                    // This is the loop over the csv files that represent the different instances.
+                    foreach (var CSVfile in Directory.GetFiles(CSVdirectory))
+                    {
+                        if (Path.GetExtension(CSVfile) != ".csv")
+                        {
+                            Console.WriteLine($"{ Path.GetFileNameWithoutExtension(CSVfile)} is not an instance.");
+                            continue;
+                        }
+                        foreach (var txtFile in Directory.GetFiles(ObservationsDirectory))
+                        {
+                            if (!Path.GetFileNameWithoutExtension(txtFile).Contains($"{Path.GetFileNameWithoutExtension(CSVfile)}") || Path.GetExtension(txtFile)!= ".txt")
+                            {
+                                continue;
+                            }
+                            Console.WriteLine($".....Testing on {Path.GetFileNameWithoutExtension(txtFile)}.....");
+                            
+                            // Here we find the corresponding .txt file, assuming that it has the same name.
+                            string fileNameTXT = Path.Join(ObservationsDirectory,$"{Path.GetFileNameWithoutExtension(txtFile)}.txt");
+                            double[,,,] observationsTXT = null;
+                            try
+                            {
+                                observationsTXT= KDEdata.ConvertTXTtoMatrix(fileNameTXT);
+                            }
+                            catch{
+                                Console.WriteLine($"FAIL: Cannot find {fileNameTXT}");
+                                continue;
+                            }
+
+                            double totalValue = 0.0;
+                            Console.WriteLine($"Starting local search with txtfile {txtFile}");
+                            for (int i = 0; i < numRepeats; i++)
+                            {
+                                // the 'failed' boolean needs to be looked at
+                                (bool failed, List<Route> ilpSol, double ilpVal, double ilpTime, double lsTime, double lsVal, string solutionJSON) = await solver.SolveVRPLTTInstanceAsyncKDE(CSVfile, observationsTXT, numLoadLevels: opts.NumLoadLevels, numIterations: opts.Iterations, timelimit: opts.TimeLimitLS * 1000, bikeMinMass: opts.BikeMinWeight, bikeMaxMass: opts.BikeMaxWeight, inputPower: opts.BikePower, numStarts: opts.NumStarts, numThreads: opts.NumThreads, config: config,ilpTimelimit:opts.TimeLimitILP);//solver.SolveSolomonInstanceAsync(file, numThreads: numThreads, numIterations: numIterations, timeLimit: 30 * 1000);
+                                string fileNameNow = Path.Join(solDir, Path.GetFileNameWithoutExtension(txtFile) + $"_{i}.txt");
+                                if (File.Exists(fileNameNow))
+                                    continue;
+                                using (var writer = new StreamWriter(fileNameNow))
+                                {
+                                    if (failed)
+                                        writer.Write("FAIL: did not meet check");
+                                    writer.WriteLine($"Score: {ilpVal}, ilpTime: {ilpTime}, lsTime: {lsTime}, Early arrival allowed {config.AllowDeterministicEarlyArrival}");
+                                    foreach (var route in ilpSol)
+                                    {
+                                        writer.WriteLine($"{route}");
+                                    }
+                                    writer.WriteLine(solutionJSON);
+                                }
+                                if (failed)
+                                    totalWriter.Write("FAIL did not meet check");
+
+                                totalValue += ilpVal;
+                                totalWriter.WriteLine($"Instance: { Path.GetFileNameWithoutExtension(txtFile)},Early arrival allowed {config.AllowDeterministicEarlyArrival}, Score: {Math.Round(ilpVal, 3)}, Vehicles: {ilpSol.Count}, ilpTime: {Math.Round(ilpTime, 3)}, lsTime: {Math.Round(lsTime, 3)}, lsVal: {Math.Round(lsVal, 3)}, ilpImp: {Math.Round((lsVal - ilpVal) / lsVal * 100, 3)}%");
+                                csvWriter.WriteLine($"{ Path.GetFileNameWithoutExtension(txtFile)};{config.AllowDeterministicEarlyArrival};{Math.Round(ilpVal, 3)};{ilpSol.Count};{Math.Round(ilpTime, 3)};{Math.Round(lsTime, 3)};{Math.Round(lsVal, 3)};{Math.Round((lsVal - ilpVal) / lsVal * 100, 3)}");
+                                totalWriter.Flush();
+                                csvWriter.Flush();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        public static async Task KDETesting(string CSVdirectory, string ObservationsDirectory, string solDir, int numRepeats, Options opts,LocalSearchConfiguration? configInput = null)
+        {
+            // This function is designed for trying different settings for the KDE method
+            // This is only used to find the ideal settings
+            Console.WriteLine("......Testing on all vrpltt instances......");
+            if (!Directory.Exists(solDir))
+                Directory.CreateDirectory(solDir);
+
+            using (var totalWriter = new StreamWriter(Path.Join(solDir, $"allSolutionsVRPLTT{opts.TestName}.txt")))
+            {
+                totalWriter.WriteLine("Command line arguments:");
+                totalWriter.WriteLine(opts.ToString());
+                LocalSearchConfiguration config;
+                
+                if(configInput == null)
+                 config = LocalSearchConfigs.VRPLTTFinal;
+                else
+                    config = (LocalSearchConfiguration)configInput;
+
+                totalWriter.WriteLine("Config:");
+                totalWriter.WriteLine(config);
+                totalWriter.Flush();
+                using (var csvWriter = new StreamWriter(Path.Join(solDir, $"allSolutionsVRPLTT{opts.TestName}.csv")))
+                {
+                    csvWriter.WriteLine("SEP=;");
+                    csvWriter.WriteLine("Instance;AllowWaiting;Score;N;ILP time;LS time;LS score;ILP imp(%)");
+
+                    // This is the loop over the csv files that represent the different instances.
+                    foreach (var CSVfile in Directory.GetFiles(CSVdirectory))
+                    {
+                        if (Path.GetExtension(CSVfile) != ".csv")
+                        {
+                            Console.WriteLine($"{ Path.GetFileNameWithoutExtension(CSVfile)} is not an instance.");
+                            continue;
+                        }
+                        foreach (var txtFile in Directory.GetFiles(ObservationsDirectory))
+                        {
+                            if (!Path.GetFileNameWithoutExtension(txtFile).Contains($"{Path.GetFileNameWithoutExtension(CSVfile)}") || Path.GetExtension(txtFile)!= ".txt")
+                            {
+                                // This if statement is designed to skip unmatched txtfiles and csvfiles 
+                                // i.e. we skip files that refer to different instances
+                                continue;
+                            }
+                            Console.WriteLine($".....Testing on {Path.GetFileNameWithoutExtension(txtFile)}.....");
+                            // Here we find the corresponding .txt file, assuming that it has the same name.
+                            string fileNameTXT = Path.Join(ObservationsDirectory,$"{Path.GetFileNameWithoutExtension(txtFile)}.txt");
+                            double[,,,] observationsTXT = null;
+                            try
+                            {
+                                observationsTXT= KDEdata.ConvertTXTtoMatrix(fileNameTXT);
+                            }
+                            catch{
+                                Console.WriteLine($"FAIL: Cannot find {fileNameTXT}");
+                                continue;
+                            }
+
+                            double totalValue = 0.0;
+                            Console.WriteLine($"Starting local search with txtfile {txtFile}");
+                            for (int i = 0; i < numRepeats; i++)
+                            {
+                                // the 'failed' boolean needs to be looked at
+                                (bool failed, List<Route> ilpSol, double ilpVal, double ilpTime, double lsTime, double lsVal, string solutionJSON) = await solver.SolveVRPLTTInstanceAsyncKDE(CSVfile, observationsTXT, numLoadLevels: opts.NumLoadLevels, numIterations: opts.Iterations, timelimit: opts.TimeLimitLS * 1000, bikeMinMass: opts.BikeMinWeight, bikeMaxMass: opts.BikeMaxWeight, inputPower: opts.BikePower, numStarts: opts.NumStarts, numThreads: opts.NumThreads, config: config,ilpTimelimit:opts.TimeLimitILP);//solver.SolveSolomonInstanceAsync(file, numThreads: numThreads, numIterations: numIterations, timeLimit: 30 * 1000);
+                                using (var writer = new StreamWriter(Path.Join(solDir, Path.GetFileNameWithoutExtension(txtFile) + $"_{i}.txt")))
+                                {
+                                    if (failed)
+                                        writer.Write("FAIL: did not meet check");
+                                    writer.WriteLine($"Score: {ilpVal}, ilpTime: {ilpTime}, lsTime: {lsTime}, Early arrival allowed {config.AllowDeterministicEarlyArrival}");
+                                    foreach (var route in ilpSol)
+                                    {
+                                        writer.WriteLine($"{route}");
+                                    }
+                                    writer.WriteLine(solutionJSON);
+                                }
+                                if (failed)
+                                    totalWriter.Write("FAIL did not meet check");
+
+                                totalValue += ilpVal;
+
+                                totalWriter.WriteLine($"Instance: { Path.GetFileNameWithoutExtension(txtFile)},Early arrival allowed {config.AllowDeterministicEarlyArrival}, Score: {Math.Round(ilpVal, 3)}, Vehicles: {ilpSol.Count}, ilpTime: {Math.Round(ilpTime, 3)}, lsTime: {Math.Round(lsTime, 3)}, lsVal: {Math.Round(lsVal, 3)}, ilpImp: {Math.Round((lsVal - ilpVal) / lsVal * 100, 3)}%");
+                                csvWriter.WriteLine($"{ Path.GetFileNameWithoutExtension(txtFile)};{config.AllowDeterministicEarlyArrival};{Math.Round(ilpVal, 3)};{ilpSol.Count};{Math.Round(ilpTime, 3)};{Math.Round(lsTime, 3)};{Math.Round(lsVal, 3)};{Math.Round((lsVal - ilpVal) / lsVal * 100, 3)}");
+                                totalWriter.Flush();
+                                csvWriter.Flush();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        public static async Task KDETestingParams(string CSVdirectory, string ObservationsDirectory, string solDir, int numRepeats, Options opts,LocalSearchConfiguration? configInput = null)
+        {
+            // This function is designed for trying different settings for the KDE method
+            // This is only used to find the ideal settings
+            Console.WriteLine("......Testing on all vrpltt instances......");
+            if (!Directory.Exists(solDir))
+                Directory.CreateDirectory(solDir);
+
+            using (var totalWriter = new StreamWriter(Path.Join(solDir, $"allSolutionsVRPLTT{opts.TestName}.txt")))
+            {
+                totalWriter.WriteLine("Command line arguments:");
+                totalWriter.WriteLine(opts.ToString());
+                LocalSearchConfiguration config;
+                
+                if(configInput == null)
+                 config = LocalSearchConfigs.VRPLTTFinal;
+                else
+                    config = (LocalSearchConfiguration)configInput;
+                
+                //string[] kernels = new string[] {"Epanechnikov","None"};
+                //string[] bandwidths = new string[] {"fixed", "AMISE", "gamma"};
+
+                // This phrasing ensures the code can also run on .Net6.0
+                string[] kernels = new string[] {"Epanechnikov", "None"};
+                string[] bandwidths = new string[] {"AMISE", "fixed", "gamma"};
+
+                totalWriter.Flush();
+                using (var csvWriter = new StreamWriter(Path.Join(solDir, $"allSolutionsVRPLTT{opts.TestName}.csv")))
+                {
+                    csvWriter.WriteLine("SEP=;");
+                    csvWriter.WriteLine("Instance;AllowWaiting;Score;N;ILP time;LS time;LS score;ILP imp(%)");
+
+                    // This is the loop over the csv files that represent the different instances.
+                    foreach (var CSVfile in Directory.GetFiles(CSVdirectory))
+                    {
+                        if (Path.GetExtension(CSVfile) != ".csv")
+                        {
+                            Console.WriteLine($"{ Path.GetFileNameWithoutExtension(CSVfile)} is not an instance.");
+                            continue;
+                        }
+                        foreach (var txtFile in Directory.GetFiles(ObservationsDirectory))
+                        {
+                            if (!Path.GetFileNameWithoutExtension(txtFile).Contains($"{Path.GetFileNameWithoutExtension(CSVfile)}") || Path.GetExtension(txtFile)!= ".txt")
+                            {
+                                // This if statement is designed to skip unmatched txtfiles and csvfiles 
+                                // i.e. we skip files that refer to different instances
+                                continue;
+                            }
+                            Console.WriteLine($".....Testing on {Path.GetFileNameWithoutExtension(txtFile)}.....");
+                            // Here we find the corresponding .txt file, assuming that it has the same name.
+                            string fileNameTXT = Path.Join(ObservationsDirectory,$"{Path.GetFileNameWithoutExtension(txtFile)}.txt");
+                            double[,,,] observationsTXT = null;
+                            try
+                            {
+                                observationsTXT= KDEdata.ConvertTXTtoMatrix(fileNameTXT);
+                            }
+                            catch{
+                                Console.WriteLine($"FAIL: Cannot find {fileNameTXT}");
+                                continue;
+                            }
+                            foreach (string kernel in kernels)
+                            {
+                                foreach (string bandwidth in bandwidths)
+                                {
+                                    config.kernelChoice = kernel;
+                                    config.bandwidth = bandwidth;
+                                    totalWriter.WriteLine($"Config: {config.kernelChoice} with bandwidth {config.bandwidth}"); 
+                                    config.txtFileName = Path.GetFileNameWithoutExtension(txtFile);
+
+                                    double totalValue = 0.0;
+                                    Console.WriteLine($"Starting local search with {config.kernelChoice} and {config.bandwidth} on {Path.GetFileNameWithoutExtension(txtFile)}");
+                                    for (int i = 0; i < numRepeats; i++)
+                                    {
+                                        // the 'failed' boolean needs to be looked at
+                                        (bool failed, List<Route> ilpSol, double ilpVal, double ilpTime, double lsTime, double lsVal, string solutionJSON) = await solver.SolveVRPLTTInstanceAsyncKDE(CSVfile, observationsTXT, numLoadLevels: opts.NumLoadLevels, numIterations: opts.Iterations, timelimit: opts.TimeLimitLS * 1000, bikeMinMass: opts.BikeMinWeight, bikeMaxMass: opts.BikeMaxWeight, inputPower: opts.BikePower, numStarts: opts.NumStarts, numThreads: opts.NumThreads, config: config,ilpTimelimit:opts.TimeLimitILP, repetition: i);//solver.SolveSolomonInstanceAsync(file, numThreads: numThreads, numIterations: numIterations, timeLimit: 30 * 1000);
+                                        using (var writer = new StreamWriter(Path.Join(solDir, Path.GetFileNameWithoutExtension(txtFile) + $"_{config.WaitingPenalty}_{config.LatenessPenalty}_{i}.txt")))
+                                        {
+                                            if (failed)
+                                                writer.Write("FAIL: did not meet check..");
+                                            writer.WriteLine($"Score: {ilpVal}, ilpTime: {ilpTime}, lsTime: {lsTime}, Early arrival allowed {config.AllowDeterministicEarlyArrival}");
+                                            foreach (var route in ilpSol)
+                                            {
+                                                writer.WriteLine($"{route}");
+                                            }
+                                            writer.WriteLine(solutionJSON);
+                                        }
+                                        if (failed)
+                                            totalWriter.Write("FAIL did not meet check..");
+
+                                        totalValue += ilpVal;
+
+                                        totalWriter.WriteLine($"Instance: { Path.GetFileNameWithoutExtension(txtFile)+ $"_{kernel}_{bandwidth}"},Early arrival allowed {config.AllowDeterministicEarlyArrival}, Score: {Math.Round(ilpVal, 3)}, Vehicles: {ilpSol.Count}, ilpTime: {Math.Round(ilpTime, 3)}, lsTime: {Math.Round(lsTime, 3)}, lsVal: {Math.Round(lsVal, 3)}, ilpImp: {Math.Round((lsVal - ilpVal) / lsVal * 100, 3)}%");
+                                        csvWriter.WriteLine($"{ Path.GetFileNameWithoutExtension(txtFile)};{config.AllowDeterministicEarlyArrival};{Math.Round(ilpVal, 3)};{ilpSol.Count};{Math.Round(ilpTime, 3)};{Math.Round(lsTime, 3)};{Math.Round(lsVal, 3)};{Math.Round((lsVal - ilpVal) / lsVal * 100, 3)}");
+                                        totalWriter.Flush();
+                                        csvWriter.Flush();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }  
+            }
+        }
+        public static async Task KDETestingWithWeights(string CSVdirectory, string ObservationsDirectory, string solDir, int numRepeats, Options opts,LocalSearchConfiguration? configInput = null)
+        {
+            // This function is designed for trying different settings for the KDE method
+            // This is only used to find the ideal settings
+            Console.WriteLine("......Testing on all vrpltt instances......");
+            if (!Directory.Exists(solDir))
+                Directory.CreateDirectory(solDir);
+
+            using (var totalWriter = new StreamWriter(Path.Join(solDir, $"allSolutionsVRPLTT{opts.TestName}.txt")))
+            {
+                totalWriter.WriteLine("Command line arguments:");
+                totalWriter.WriteLine(opts.ToString());
+                LocalSearchConfiguration config;
+                
+                if(configInput == null)
+                 config = LocalSearchConfigs.VRPLTTFinal;
+                else
+                    config = (LocalSearchConfiguration)configInput;
+                
+                double[] WaitingPenaltiesList = [1.1, 2, 1];
+                double[] LatenessPenaltiesList = [20, 50, 1, 100];
+
+                totalWriter.WriteLine("Config:");
+                totalWriter.WriteLine(config.WaitingPenalty);
+                totalWriter.WriteLine(config.LatenessPenalty);
+                totalWriter.Flush();
+                using (var csvWriter = new StreamWriter(Path.Join(solDir, $"allSolutionsVRPLTT{opts.TestName}.csv")))
+                {
+                    csvWriter.WriteLine("SEP=;");
+                    csvWriter.WriteLine("Instance;AllowWaiting;Score;N;ILP time;LS time;LS score;ILP imp(%)");
+
+                    // This is the loop over the csv files that represent the different instances.
+                    foreach (var CSVfile in Directory.GetFiles(CSVdirectory))
+                    {
+                        if (Path.GetExtension(CSVfile) != ".csv")
+                        {
+                            Console.WriteLine($"{ Path.GetFileNameWithoutExtension(CSVfile)} is not an instance.");
+                            continue;
+                        }
+                        foreach (var txtFile in Directory.GetFiles(ObservationsDirectory))
+                        {
+                            if (!Path.GetFileNameWithoutExtension(txtFile).Contains($"{Path.GetFileNameWithoutExtension(CSVfile)}") || Path.GetExtension(txtFile)!= ".txt")
+                            {
+                                // This if statement is designed to skip unmatched txtfiles and csvfiles 
+                                // i.e. we skip files that refer to different instances
+                                continue;
+                            }
+                            Console.WriteLine($".....Testing on {Path.GetFileNameWithoutExtension(txtFile)}.....");
+                            // Here we find the corresponding .txt file, assuming that it has the same name.
+                            string fileNameTXT = Path.Join(ObservationsDirectory,$"{Path.GetFileNameWithoutExtension(txtFile)}.txt");
+                            double[,,,] observationsTXT = null;
+                            try
+                            {
+                                observationsTXT= KDEdata.ConvertTXTtoMatrix(fileNameTXT);
+                            }
+                            catch{
+                                Console.WriteLine($"FAIL: Cannot find {fileNameTXT}");
+                                continue;
+                            }
+                            foreach (double WaitingPenaltyLocal in WaitingPenaltiesList)
+                            {
+                                foreach (double LatenessPenaltyLocal in LatenessPenaltiesList)
+                                {
+                                    config.WaitingPenalty = WaitingPenaltyLocal;
+                                    config.LatenessPenalty = LatenessPenaltyLocal;
+
+                                    double totalValue = 0.0;
+                                    Console.WriteLine($"Starting local search with txtfile {txtFile}");
+                                    for (int i = 0; i < numRepeats; i++)
+                                    {
+                                        // the 'failed' boolean needs to be looked at
+                                        (bool failed, List<Route> ilpSol, double ilpVal, double ilpTime, double lsTime, double lsVal, string solutionJSON) = await solver.SolveVRPLTTInstanceAsyncKDE(CSVfile, observationsTXT, numLoadLevels: opts.NumLoadLevels, numIterations: opts.Iterations, timelimit: opts.TimeLimitLS * 1000, bikeMinMass: opts.BikeMinWeight, bikeMaxMass: opts.BikeMaxWeight, inputPower: opts.BikePower, numStarts: opts.NumStarts, numThreads: opts.NumThreads, config: config,ilpTimelimit:opts.TimeLimitILP);//solver.SolveSolomonInstanceAsync(file, numThreads: numThreads, numIterations: numIterations, timeLimit: 30 * 1000);
+                                        using (var writer = new StreamWriter(Path.Join(solDir, Path.GetFileNameWithoutExtension(txtFile) + $"_{config.WaitingPenalty}_{config.LatenessPenalty}_{i}.txt")))
+                                        {
+                                            if (failed)
+                                                writer.Write("FAIL: did not meet check..");
+                                            writer.WriteLine($"Score: {ilpVal}, ilpTime: {ilpTime}, lsTime: {lsTime}, Early arrival allowed {config.AllowDeterministicEarlyArrival}");
+                                            foreach (var route in ilpSol)
+                                            {
+                                                writer.WriteLine($"{route}");
+                                            }
+                                            writer.WriteLine(solutionJSON);
+                                        }
+                                        if (failed)
+                                            totalWriter.Write("FAIL did not meet check..");
+
+                                        totalValue += ilpVal;
+
+                                        totalWriter.WriteLine($"Instance: { Path.GetFileNameWithoutExtension(txtFile)+ $"_{config.WaitingPenalty}_{config.LatenessPenalty}"},Early arrival allowed {config.AllowDeterministicEarlyArrival}, Score: {Math.Round(ilpVal, 3)}, Vehicles: {ilpSol.Count}, ilpTime: {Math.Round(ilpTime, 3)}, lsTime: {Math.Round(lsTime, 3)}, lsVal: {Math.Round(lsVal, 3)}, ilpImp: {Math.Round((lsVal - ilpVal) / lsVal * 100, 3)}%");
+                                        csvWriter.WriteLine($"{ Path.GetFileNameWithoutExtension(txtFile)};{config.AllowDeterministicEarlyArrival};{Math.Round(ilpVal, 3)};{ilpSol.Count};{Math.Round(ilpTime, 3)};{Math.Round(lsTime, 3)};{Math.Round(lsVal, 3)};{Math.Round((lsVal - ilpVal) / lsVal * 100, 3)}");
+                                        totalWriter.Flush();
+                                        csvWriter.Flush();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }  
+            }
+        }
         public static async Task TestAllOperatorConfigurations(string dir,string solDir, Options opts)
         {
             var config = LocalSearchConfigs.VRPLTTOriginal;
@@ -228,7 +613,6 @@ namespace SA_ILP
             await RunVRPLTTTests(dir, newSolDir, opts.NumRepeats, opts, config);
 
         }
-
         public static async Task RunVRPLTTWindtests(string dir, string solDir, int numRepeats, Options opts)
         {
             Console.WriteLine("Testing with wind on all vrpltt instances");
@@ -251,36 +635,24 @@ namespace SA_ILP
 
                     for (int test = 0; test < 1; test++)
                     {
-                        if (test == 4)
-                        {
-
-                            config.WindDirection = new double[] { 0, -1 };
-                            config.WindSpeed = testWindSpeed;
-                        }
-                        else if (test == 1)
-                        {
-                            config.WindDirection = new double[] { 1, 0 };
-                        }
-                        else if (test == 2)
-                        {
-                            config.WindDirection = new double[] { -1, 0 };
-                        }
-                        else if (test == 3)
-                        {
-                            //Testing the default vrpltt
-                            config.WindSpeed = 0;
-                        }
-
                         foreach (var file in Directory.GetFiles(dir))
                         {
+                            // These lines are needed for MAC OS users.
+                            if (file.EndsWith(".DS_Store"))
+                                continue;
                             for (int repeat = 0; repeat < numRepeats; repeat++)
                             {
+                                string fileNameNow = Path.Join(solDir, Path.GetFileNameWithoutExtension(file) + $"_Ws{config.WindSpeed.ToString().Replace(',','.')}_Wd0_Sam_0_{test}_{repeat}.txt");
+                                if (File.Exists(fileNameNow))
+                                {
+                                    Console.WriteLine($"File already exists for {fileNameNow}");
+                                    continue;
+                                }
                                 //Running the test
                                 (bool failed, List<Route> ilpSol, double ilpVal, double ilpTime, double lsTime, double lsVal, string solutionJSON) = await solver.SolveVRPLTTInstanceAsync(file, numLoadLevels: opts.NumLoadLevels, numIterations: opts.Iterations, timelimit: opts.TimeLimitLS * 1000, bikeMinMass: opts.BikeMinWeight, bikeMaxMass: opts.BikeMaxWeight, inputPower: opts.BikePower, numStarts: opts.NumStarts, numThreads: opts.NumThreads, config: config,ilpTimelimit:opts.TimeLimitILP);//solver.SolveSolomonInstanceAsync(file, numThreads: numThreads, numIterations: numIterations, timeLimit: 30 * 1000);
 
                                 var windResult = VRPLTT.CalculateWindCyclingTime(file, opts.BikeMinWeight, opts.BikeMaxWeight, opts.NumLoadLevels, opts.BikePower, config.WindDirection, ilpSol);
-
-                                using (var writer = new StreamWriter(Path.Join(solDir, Path.GetFileNameWithoutExtension(file) + $"_{test}_{repeat}.txt")))
+                                using (var writer = new StreamWriter(fileNameNow))
                                 {
                                     if (failed)
                                         writer.Write("FAIL did not meet check");
@@ -305,17 +677,16 @@ namespace SA_ILP
                                     (double[,] distances, List<Customer> customers) = VRPLTT.ParseVRPLTTInstance(file);
 
                                     Console.WriteLine("Calculating travel time matrix");
-                                    (double[,,] matrix, Gamma[,,] distributionMatrix, IContinuousDistribution[,,] approximationMatrix, _) = VRPLTT.CalculateLoadDependentTimeMatrix(customers, distances, opts.BikeMinWeight, opts.BikeMaxWeight, opts.NumLoadLevels, opts.BikePower, tempConfig.WindSpeed, tempConfig.WindDirection, tempConfig.DefaultDistribution is Normal);
                                     LocalSearch ls = new LocalSearch(tempConfig,1);
                                     double total = 0;
                                    ;
                                     foreach( var r in ilpSol)
                                     {
                                         var rs = new RouteStore(r.CreateIdList(), 0);
-                                        var newRoute = new Route(customers, rs, customers[0], matrix, distributionMatrix, approximationMatrix, opts.BikeMaxWeight - opts.BikeMinWeight, ls);
-                                        total += newRoute.CalcObjective();
-                                        if(newRoute.CheckRouteValidity())
-                                            valid--;
+                                        //var newRoute = new Route(customers, rs, customers[0], opts.BikeMaxWeight - opts.BikeMinWeight, ls);
+                                        //total += newRoute.CalcObjectiveKDE();
+                                        //if(newRoute.CheckRouteValidity())
+                                           // valid--;
                                     }
                                     cycleSpeedWithWind = total;
                                 }
@@ -325,20 +696,15 @@ namespace SA_ILP
                                 csvWriter.WriteLine($"{Path.GetFileNameWithoutExtension(file)};{config.WindSpeed};({config.WindDirection[0]},{config.WindDirection[1]});{ilpVal};{ilpTime};{lsTime};{lsVal};{(ilpVal - lsVal) / lsVal * 100};{windResult};{cycleSpeedWithWind};{(double)valid / ilpSol.Count}");
                                 csvWriter.Flush();
                                 
-
                                 if (failed)
                                     totalWriter.Write("FAIL did not meet check");
                                 totalWriter.Flush();
                             }
                         }
                     }
-
                 }
             }
-
         }
-
-
         public static async Task BenchmarkLocalSearchSpeed(string dir, string solDir,int numRepeats,Options opts)
         {
             Console.WriteLine("Benchmarking localsearch");
@@ -365,7 +731,6 @@ namespace SA_ILP
 
                         (var allColumns, var bestSolution, var LSTime, var LSSCore) = await solver.LocalSearchInstancAsync("", customers.Count - 1, opts.BikeMaxWeight - opts.BikeMinWeight, customers, matrix, distributionMatrix, approximationMatrix, opts.NumThreads, opts.NumStarts, opts.Iterations, opts.TimeLimitLS * 1000, config);
 
-
                         using (var writer = new StreamWriter(Path.Join(solDir, Path.GetFileNameWithoutExtension(file) + $"_{test}.txt")))
                         {
                             writer.WriteLine($"Score: {LSSCore}, lsTime: {LSTime}, Early arrival allowed {config.AllowDeterministicEarlyArrival}");
@@ -385,7 +750,6 @@ namespace SA_ILP
                 }
             }
         }
-
         public static async Task RunLastVRPSLTTTests(string dir, string solDir, int numRepeats,Options opts)
         {
             LocalSearchConfiguration config;
@@ -398,9 +762,7 @@ namespace SA_ILP
             newSolDir = Path.Join(solDir, "WithWaitingNormalInBetweenMaximizaton");
             opts.TestName = "WithWaitingNormalInBetweenMaximizaton";
             await RunVRPSLTTTest(dir, newSolDir, numRepeats, opts, config);
-
         }
-
         public static async Task RunVRPSLTTTests(string dir, string solDir, int numRepeats, Options opts)
         {
             LocalSearchConfiguration config;
@@ -458,7 +820,6 @@ namespace SA_ILP
             await RunVRPSLTTTest(dir, newSolDir, numRepeats, opts, config);
 
         }
-
         public static async Task RunVRPSLTTTest(string dir, string solDir, int numRepeats, Options opts,LocalSearchConfiguration config)
         {
             Console.WriteLine("Testing on all vrpltt instances");
@@ -480,12 +841,9 @@ namespace SA_ILP
                             if (Path.GetExtension(file) != ".csv")
                                 continue;
 
-
                             for (int r = 0; r < numRepeats; r++)
                             {
-
                                 (bool failed, List<Route> ilpSol, double ilpVal, double ilpTime, double lsTime, double lsVal, string solutionJSON) = await solver.SolveVRPLTTInstanceAsync(file, numLoadLevels: opts.NumLoadLevels, numIterations: opts.Iterations, timelimit: opts.TimeLimitLS * 1000, bikeMinMass: opts.BikeMinWeight, bikeMaxMass: opts.BikeMaxWeight, inputPower: opts.BikePower, numStarts: opts.NumStarts, numThreads: opts.NumThreads, config: config,ilpTimelimit:opts.TimeLimitILP);//solver.SolveSolomonInstanceAsync(file, numThreads: numThreads, numIterations: numIterations, timeLimit: 30 * 1000);
-
 
                                 double totalDist = 0;
                                 double totalOntimePercentage = 0;
@@ -500,7 +858,6 @@ namespace SA_ILP
                                 Route? estimatedWorstRoute = null;
                                 int estimatedWorstRouteCustomer = -1;
 
-
                                 foreach (var route in ilpSol)
                                 {
                                     if (route.route.Count != 2)
@@ -512,7 +869,6 @@ namespace SA_ILP
                                         int worstIndex = -1;
                                         for (int i = 0; i < route.route.Count-1; i++)
                                         {
-
                                             if (route.customerDistributions[i] != null)
                                             {
                                                 total += 1;
@@ -580,11 +936,7 @@ namespace SA_ILP
                                         }
                                         Console.WriteLine($"Simmulated on time perfomance: {res.OnTimePercentage} worst: {min} at {minIndex}\n");
                                     }
-
                                 }
-
-
-
 
                                 using (var writer = new StreamWriter(Path.Join(solDir, Path.GetFileNameWithoutExtension(file) + $"_{r}.txt")))
                                 {
@@ -600,7 +952,6 @@ namespace SA_ILP
                                 if (failed)
                                     totalWriter.Write("FAIL did not meet check");
 
-
                                 totalValue += ilpVal;
 
                                 totalWriter.WriteLine($"Instance: { Path.GetFileNameWithoutExtension(file)},Early arrival allowed {config.AllowDeterministicEarlyArrival}, Score: {Math.Round(ilpVal, 3)}, Vehicles: {ilpSol.Count}, ilpTime: {Math.Round(ilpTime, 3)}, lsTime: {Math.Round(lsTime, 3)}, lsVal: {Math.Round(lsVal, 3)}, ilpImp: {Math.Round((lsVal - ilpVal) / lsVal * 100, 3)}%");
@@ -608,15 +959,10 @@ namespace SA_ILP
                                 totalWriter.Flush();
                                 csvWriter.Flush();
                             }
-                        }
-                    
+                        } 
                 }
             }
         }
-
-
-
-
         public static async Task SolveAllAsync(string dir, string solDir, List<String> skip, Options opts)
         {
             if (!Directory.Exists(solDir))
@@ -668,7 +1014,6 @@ namespace SA_ILP
                         if (failed)
                             totalWriter.Write("FAIL did not meet check");
 
-
                         totalValue += ilpVal;
                         total++;
 
@@ -677,10 +1022,6 @@ namespace SA_ILP
                         csvWriter.Flush();
                     }
             }
-
-
-
-
         }
     }
 }

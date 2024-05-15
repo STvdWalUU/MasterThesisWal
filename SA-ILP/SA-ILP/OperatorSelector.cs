@@ -36,8 +36,6 @@ namespace SA_ILP
             operatorHistory = new List<string>();
             repeats = new List<int>();
         }
-
-
         public void Add(Operator op, double weight, String label = "unnamed-operator", int numRepeats = -1)
         {
             if (numRepeats == -1)
@@ -53,6 +51,7 @@ namespace SA_ILP
             weights.Add(weight);
             labels.Add(label);
 
+            // the thresholds list is redefined with adding each new operator
             threshHolds = new List<double>();
             double totalWeight = weights.Sum();
 
@@ -80,6 +79,8 @@ namespace SA_ILP
             var p = random.NextDouble();
             for (int i = 0; i < threshHolds.Count; i++)
             {
+                // thresholds is a list of doubles that split up the interval [0.1] into subintervals 
+                //with relativel length equal to their relative weight
                 if (p <= threshHolds[i])
                 {
                     LastOperator = labels[i];
@@ -90,9 +91,6 @@ namespace SA_ILP
 
             throw new Exception("Threshold error");
         }
-
-
-
         public override string ToString()
         {
             string res = "";
@@ -104,8 +102,5 @@ namespace SA_ILP
             return res;
             //return base.ToString();
         }
-
-
-
     }
 }

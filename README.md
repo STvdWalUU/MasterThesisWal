@@ -1,7 +1,9 @@
 # SA-ILP
- 
-This reposity contains the code for the SA-ILP algorithm created for the VRPLTT model as introduced by Fontaine https://www.sciencedirect.com/science/article/abs/pii/S0377221721007682. This is version of the capacitated vehicle routing problem with time windows.
 
-This code was created as a research project and therefore, is only sparingly commented and some code might be rather bloated. Executing the full multithreaded version of the algorithm requires an active Gurobi license on the machine. Some examples on how to use the code can be found in Program.cs, where the launch parameters are checked.
+This repository contains three folders. All code was used for the writing of a Master's Thesis. It is either downloaded open source and edited or created by the publisher.
 
-This repository also contains the created Utrecht vrpltt instance
+The folder 'SA-ILP' contains code for the SA-ILP algorithm created by Sam Hesselmans (2022) and edited to solve the SVRPTW using a KDE approximation to arrival times distributions. Only the parts that were edited and/or used by the KDE version of the algorithm are commented by me (S.T. van der Wal). The rest is from S. Hesselmans. See his repository for more information via https://github.com/samhesselmans/SA-ILP.
+
+The folder 'Instances' contains the instances that are were used in the thesis and contains code to compute edited instances and the code to obtain the sample data for the KDE method.
+
+The folder 'Simulator' contains the code used to simulate and analyze the produced schedules. 

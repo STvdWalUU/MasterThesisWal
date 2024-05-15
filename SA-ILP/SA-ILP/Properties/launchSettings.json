@@ -2,20 +2,21 @@
   "profiles": {
     "SA-ILP": {
       "commandName": "Project",
-      "commandLineArgs": "allvrpltt ..\\..\\..\\..\\..\\vrpltt_instances\\large --threads 6 --starts 16 --lstl 480 --loadlevels 10 --config VRPLTTNoGreedyOperators",
+      "commandLineArgs": "allvrpltt /CSVfilesFull/15apr --threads 7 --starts 7 --lstl 180 --loadlevels 10 --repeats 2 --iterations 9000000--config VRPLTTFinal",
       "environmentVariables": {
         "DOTNET_gcServer": "1"
       }
     },
     "SA-ILP no launch parameters": {
       "commandName": "Project",
+      "commandLineArgs": " --threads 2",
       "environmentVariables": {
         "DOTNET_gcServer": "1"
       }
     },
     "SA-ILP solomon test": {
       "commandName": "Project",
-      "commandLineArgs": "allvrp ..\\..\\..\\..\\..\\solomon_instances --threads 4 --starts 16 --lstl 480 --testname TestTest"
+      "commandLineArgs": "allvrp ..\\..\\..\\..\\..\\solomon_instances --threads 2 --starts 16 --lstl 480 --testname TestTest"
     }
   }
 }

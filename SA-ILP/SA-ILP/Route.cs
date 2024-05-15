@@ -5,6 +5,11 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using System.ComponentModel;
+using MathNet.Numerics.Interpolation;
+using System.IO.Pipes;
+using System.Security.Cryptography.X509Certificates;
+using System.Xml.Schema;
 
 namespace SA_ILP
 {
@@ -47,15 +52,15 @@ namespace SA_ILP
         public List<Customer> route;
         public List<double> arrival_times;
         public List<IContinuousDistribution> customerDistributions;
-        public readonly double[,,] objective_matrix;
+        public readonly double[,,] objective_matrix; 
         public readonly Gamma[,,] distributionMatrix;
+        public readonly double[,,,]? observationMatrix; // !!!!!!!!!!!!!!!!!!!
         public readonly IContinuousDistribution[,,] distributionApproximationMatrix;
         public double startTime = 0;
-
         public int numLoadLevels;
         public int numX;
         public int numY;
-
+        private double KDECachedObjective = -1;
         public double Score
         {
             get
@@ -63,11 +68,23 @@ namespace SA_ILP
                 if (CachedObjective != -1)
                     return CachedObjective;
                 else
-                    return CalcObjective();
-
+                {
+                    //double scoreNu = CalcObjective();
+                    //Console.WriteLine(string.Format("standaard score = {0:N2}",scoreNu));
+                    //double[] weights = [1,1];
+                    //scoreNu = CalcObjectiveKDE(weights);
+                    //Console.WriteLine(string.Format("KDE score = {0:N2}",scoreNu));
+                    if (parent.Config.useKDE)
+                    {
+                        //Console.WriteLine($"original method: {CalcObjectiveKDE()}");
+                        //Console.WriteLine($"second method: {CalcObjectiveKDE2()}");
+                        return CalcObjectiveKDE();
+                    }
+                    else
+                        return CalcObjective();
+                }
             }
         }
-
         private int CashedHashCode = -1;
         public int HashCode
         {
@@ -94,9 +111,7 @@ namespace SA_ILP
         private double CachedObjective;
         private Dictionary<int, (int, double)> BestCustomerPos;
         private Dictionary<(int, int), (bool, bool, double)> CustPossibleAtPosCache;
-
         private Random random;
-
 
         public Func<Customer, Customer, double, bool, (double, IContinuousDistribution)> CustomerDist;
         public Func<IContinuousDistribution, IContinuousDistribution, double, IContinuousDistribution> AddDistributions;
@@ -113,6 +128,8 @@ namespace SA_ILP
             this.numLoadLevels = distanceMatrix.GetLength(2);
 
             this.parent = parent;
+            if (parent.Config.useKDE)
+                {this.observationMatrix = KDEdata.ObservationsMatrix;}
 
             this.time_done = 0;
             used_capacity = 0;
@@ -126,12 +143,29 @@ namespace SA_ILP
             SetFunctions();
         }
 
+        public Route(Customer depot, double maxCapacity, double[,,,] observations, int seed, LocalSearch parent)
+        //this one is used for KDE version
+        {
+            this.route = new List<Customer>(20) { depot, depot };
+            this.observationMatrix = observations;
+            this.numX = observationMatrix.GetLength(0);
+            this.numY = observationMatrix.GetLength(1);
+            this.numLoadLevels = observationMatrix.GetLength(2);
 
+            //Console.WriteLine($"numX = {numX}, numY={numY}, numll = {numLoadLevels}, numObs={observationMatrix.GetLength(3)}");
+            this.parent = parent;
+
+            this.time_done = 0;
+            used_capacity = 0;
+            this.max_capacity = maxCapacity;
+            random = new Random(seed);
+            SetFunctions();
+            ResetCache();
+        }
         public override string ToString()
         {
             return $"({String.Join(',', CreateIdList())})";
         }
-
 
         public Route(List<Customer> route, List<double> arrivalTimes, List<IContinuousDistribution> customerDistributions, double[,,] distanceMatrix, Gamma[,,] distributionMatrix, IContinuousDistribution[,,] approximationMatrix, double usedCapcity, double maxCapacity, int seed, LocalSearch parent, double startTime)
         {
@@ -142,7 +176,11 @@ namespace SA_ILP
             this.numX = distanceMatrix.GetLength(0);
             this.numY = distanceMatrix.GetLength(1);
             this.numLoadLevels = distanceMatrix.GetLength(2);
+
             this.parent = parent;
+            if (parent.Config.useKDE)
+                this.observationMatrix = KDEdata.ObservationsMatrix;
+
             this.time_done = 0;
             used_capacity = usedCapcity;
             this.max_capacity = maxCapacity;
@@ -152,6 +190,26 @@ namespace SA_ILP
             this.distributionApproximationMatrix = approximationMatrix;
             ResetCache();
 
+            SetFunctions();
+        }
+        public Route(List<Customer> route, double usedCapcity, double maxCapacity, double[,,,] observations, int seed, LocalSearch parent, double startTime)
+        {
+            // this one is also used for KDE
+            this.route = route;
+            this.observationMatrix = observations;
+            this.numX = observations.GetLength(0);
+            this.numY = observations.GetLength(1);
+            this.numLoadLevels = observations.GetLength(2);
+
+            //Console.WriteLine($"line 192: numX = {numX}, numY={numY}, numll = {numLoadLevels}, numObs={observationMatrix.GetLength(3)}");
+
+            this.parent = parent;
+            this.time_done = 0;
+            used_capacity = usedCapcity;
+            this.max_capacity = maxCapacity;
+            this.startTime = startTime;
+            random = new Random(seed);
+            ResetCache();
             SetFunctions();
         }
 
@@ -167,6 +225,9 @@ namespace SA_ILP
 
             this.parent = parent;
             this.distributionMatrix = distributionMatrix;
+            if (parent.Config.useKDE)
+                this.observationMatrix = KDEdata.ObservationsMatrix;
+
             this.distributionApproximationMatrix = approximationMatrix;
             this.time_done = 0;
             used_capacity = 0;
@@ -185,7 +246,38 @@ namespace SA_ILP
             }
 
         }
+        public Route(List<Customer> customers, RouteStore routeStore, Customer depot, double maxCapacity, double[,,,] observations, LocalSearch parent)
+        {
+            // this one is also for KDE
+            this.route = new List<Customer>() { depot, depot };
+            this.arrival_times = new List<double>() { 0, 0 };
+            this.customerDistributions = new List<IContinuousDistribution>() { null, null };
+            //objective_matrix = null;
+            this.observationMatrix = observations;
+            this.numX = observations.GetLength(0);
+            this.numY = observations.GetLength(1);
+            this.numLoadLevels = observations.GetLength(2);
 
+            //Console.WriteLine($"line 242: numX = {numX}, numY={numY}, numll = {numLoadLevels}, numObs={observationMatrix.GetLength(3)}");
+
+            this.parent = parent;
+            this.distributionMatrix = null;
+            this.distributionApproximationMatrix = null;
+            this.time_done = 0;
+            used_capacity = 0;
+            this.max_capacity = maxCapacity;
+            random = new Random();
+
+            ResetCache();
+            SetFunctions();
+
+            foreach (int cust in routeStore.Route)
+            {
+                //Do not insert the depots
+                if (cust != 0)
+                    this.InsertCust(customers.First(x => x.Id == cust), route.Count - 1);
+            }
+        }
         private bool UsesStochasticImplementation()
         {
             return parent.Config.UseStochasticFunctions;
@@ -206,79 +298,197 @@ namespace SA_ILP
             }
 
         }
-
         public double CalculateEarlyPenaltyTerm(double arrivalTime, double timewindowStart)
         {
             if (!parent.Config.PenalizeDeterministicEarlyArrival)
-                return 0;// 100 + timewindowStart - arrivalTime;// timewindowStart - arrivalTime;
+            {
+                return 0;
+            }
             else
             {
-
+                if (parent.Config.useKDE)
+                {
+                    return CalculateEarlyPenaltyTermKDE(arrivalTime, timewindowStart, parent.Config.WaitingPenalty);
+                }
                 //Add possibility to remove ramping based on penalty
                 double scale = 1;
 
                 if (parent.Config.ScaleEarlinessPenaltyWithTemperature)
                     scale = parent.Temperature / parent.Config.InitialTemperature;
                 return (parent.Config.BaseEarlyArrivalPenalty + timewindowStart - arrivalTime) / scale;
-
             }
-
         }
         public double CalculateLatePenaltyTerm(double arrivalTime, double timeWindowEnd)
         {
             if (!parent.Config.PenalizeLateArrival)
                 return 0;
-            else
+            else 
             {
-
+                if (parent.Config.useKDE)
+                {
+                    return CalculateLatePenaltyTermKDE(arrivalTime, timeWindowEnd, parent.Config.LatenessPenalty);
+                }
+                
                 double scale = 1;
-
                 if (parent.Config.ScaleLatenessPenaltyWithTemperature)
                     scale = parent.Temperature / parent.Config.InitialTemperature;
-
-
                 return (parent.Config.BaseLateArrivalPenalty + arrivalTime - timeWindowEnd) / scale;
+            }
+        }
+        /// <summary>
+        /// Outputs the the value of the integral of the K_h function as defined in the KDE theory
+        /// </summary>
+        /// <param name="observation"></param>
+        /// <param name="upperlimit"></param>
+        /// <param name="h"></param>
+        /// <param name="kernel"></param>
+        /// <returns></returns>
+        /// <exception cref="Exception"></exception>
+        public static double Kernel(double observation, double upperlimit, double h, string kernel = "")
+        {
+            ///
+            /// This function picks the specified kernel en returns the integral of that kernel over the interval [0, b_j].
+            /// The value should never go higher than 1 and never lower than zero. These numbers could be adjusted 
+            /// if we would want to give some probability mass to the extremes
+            ///
+            if (kernel == "Uniform")
+                return Math.Min(0, Math.Max(1, 0.5*(upperlimit-observation+h)/h));
+            else if (kernel == "Epanechnikov")
+            {
+                if (observation <= upperlimit-h)
+                    return 0;
+                else if (observation >= upperlimit+h)
+                    return 1;
+                else
+                    return (0.5 + 3*(upperlimit-observation)/4/h - Math.Pow((upperlimit-observation)/h,3)/4)/h;
+            }
+            else if (kernel == "Gauss")
+            {
+                Normal normal = new Normal(0, h);
+                return normal.Density(upperlimit - observation);
+            }
+            else if (kernel == "None")
+                return (observation > upperlimit) ? 1 : 0;
+            else
+                throw new Exception(message:"No approriate kenrel was specified, choose Uniform, Epanechnikov, Gauss or None");
+                
+        }
+        /// <summary>
+        /// Computes the bandwidth that corresponds to the given type, possibly based on the number of observations.
+        /// </summary>
+        /// <param name="type"></param>
+        /// <param name="numberObservations"></param>
+        /// <param name="observations"></param>
+        /// <returns></returns>
+        /// <exception cref="Exception"> computation of the Silverman bandwidth did not go well</exception>
+        public static double Bandwidth(string type, int numberObservations, double[] observations = null)
+        {
+            if (type == "AMISE")
+                {return Math.Pow((double)120/numberObservations,0.2);}
+            else if (type =="fixed")
+                {return 1;}
+            else if (type == "Silverman")
+            {
+                // this is not yet fully implemented
+                double mean = observations.Average();
+                double standardDeviation = observations.Select(x => Math.Abs(x - mean)).Average();
+                double IQR ;
+                Array.Sort(observations);
+                if (numberObservations %2 ==0)
+                    IQR = observations.Skip(numberObservations/2).Take(numberObservations/2).Sum()/(numberObservations/2) - observations.Take(numberObservations/2).Sum()/(numberObservations/2);
+                else if (numberObservations %2 ==1)
+                    IQR = observations.Skip(numberObservations/2 + 1).Take(numberObservations/2).Sum()/(numberObservations/2) - observations.Take(numberObservations/2).Sum()/(numberObservations/2);
+                else
+                    throw new Exception(message: "Something went wrong with computeing the Silverman bandwidth");
+                return (double)0.9 * Math.Min(standardDeviation, IQR/1.34) * Math.Pow(1/numberObservations,0.2);
+            }
+            else
+                {throw new Exception(message:"No approriate bandwidth was specified, choose AMISE, fixed or Silverman");}
+        }
+        /// <summary>
+        /// Computes the penalty term for arriving early, i.e. waiting.
+        /// </summary>
+        /// <param name="arrivalTime"></param>
+        /// <param name="timeWindowStart"></param>
+        /// <param name="weight"></param>
+        /// <returns></returns>
+        public double CalculateEarlyPenaltyTermKDE(double arrivalTime, double timeWindowStart,double weight = 1, bool finalCalculation = false)
+        {
+            double scale = 1;
+            if (parent.Config.ScaleEarlinessPenaltyWithTemperature)
+                scale = parent.Temperature / parent.Config.InitialTemperature;
+            if (finalCalculation)
+            {
+                scale = 1/ parent.Config.InitialTemperature;
+            }
+            // incurredPenalty = 0;
+            double incurredPenalty = (timeWindowStart - arrivalTime)*weight / scale/ observationMatrix.GetLength(3);
+            return incurredPenalty;
+        }
+        /// <summary>
+        /// Computes the penalty term for arriving late. 
+        /// Using the KDE framework to approximate the probability of arriving late.
+        /// </summary>
+        /// <param name="arrivalTime"></param>
+        /// <param name="timeWindowEnd"></param>
+        /// <param name="weight"></param>
+        /// <returns></returns>
+        public double CalculateLatePenaltyTermKDE(double arrivalTime, double timeWindowEnd, double weight = 1, bool finalCalculation = false)
+        {
+            double bandwidth = Bandwidth(parent.Config.bandwidth, observationMatrix.GetLength(3));
+            if (arrivalTime <= timeWindowEnd-bandwidth)
+                return 0;
+            double scale = 1;
+            if (parent.Config.ScaleLatenessPenaltyWithTemperature)
+                scale = parent.Temperature / parent.Config.InitialTemperature;
+            if (finalCalculation){
+                scale = 1/parent.Config.InitialTemperature;
+            }
+            if (!parent.Config.useTardiness)
+            {
+                if (arrivalTime >= timeWindowEnd+bandwidth)
+                    return 1;
+                else
+                    return weight * Kernel(arrivalTime, timeWindowEnd, bandwidth, kernel: parent.Config.kernelChoice) / scale / observationMatrix.GetLength(3);
+            }
+            else
+            {
+                return (arrivalTime - timeWindowEnd)*weight / scale/ observationMatrix.GetLength(3);
             }
         }
         public double CalculateUncertaintyPenaltyTermStochastic(IContinuousDistribution dist, Customer cust, double minArrrivalTime)
         {
-
-            double toLateP = 1;
+            double tooLateP = 1;
 
             double cutOff = 0;
             if(parent.Config.CutProbabilityDistributionAt0)
                  cutOff = dist.CumulativeDistribution(0);
             if (cust.TWEnd - minArrrivalTime >= 0)
                 if (cutOff < 1)
-                    toLateP = (1 - dist.CumulativeDistribution(cust.TWEnd - minArrrivalTime)) / (1 - cutOff);
+                    tooLateP = (1 - dist.CumulativeDistribution(cust.TWEnd - minArrrivalTime)) / (1 - cutOff);
                 else
-                    toLateP = 0;
+                    tooLateP = 0;
 
-            double toEarlyP = 0;
+            double tooEarlyP = 0;
             if (cust.TWStart - minArrrivalTime >= 0)
                 if (cutOff < 1)
-                    toEarlyP = (dist.CumulativeDistribution(cust.TWStart - minArrrivalTime) - cutOff) / (1 - cutOff);
+                    tooEarlyP = (dist.CumulativeDistribution(cust.TWStart - minArrrivalTime) - cutOff) / (1 - cutOff);
                 else
-                    toEarlyP = 1;
+                    tooEarlyP = 1;
 
-            if (Double.IsNaN(toLateP))
-                toLateP = 0;
+            if (Double.IsNaN(tooLateP))
+                tooLateP = 0;
 
-            if (Double.IsNaN(toEarlyP) && dist.Mean == cust.TWStart - minArrrivalTime && dist.StdDev == 0)
-                toEarlyP = 0;
+            if (Double.IsNaN(tooEarlyP) && dist.Mean == cust.TWStart - minArrrivalTime && dist.StdDev == 0)
+                tooEarlyP = 0;
 
-            double res = toLateP * parent.Config.ExpectedLatenessPenalty + toEarlyP * parent.Config.ExpectedEarlinessPenalty;
-
-
-
+            double res = tooLateP * parent.Config.ExpectedLatenessPenalty + tooEarlyP * parent.Config.ExpectedEarlinessPenalty;
             return res;
         }
-
         public double CalculateUncertaintyPenaltyTermDeterministic(IContinuousDistribution dist, Customer cust, double minArrrivalTime)
         {
             return 0;
         }
-
         public RouteSimmulationResult Simulate(int numSimulations = 1000)
         {
             int timesOnTime = 0;
@@ -337,9 +547,6 @@ namespace SA_ILP
             return new RouteSimmulationResult(totalTravelTime, numSimulations, timesTotal, toEarly, toLate, toLateCount, toEarlyCount, totalWaitingTime);
 
         }
-
-
-
         private Gamma AddGammaDistributions(Gamma left, Gamma right, double diffWithLowerTimeWindow = -1)
         {
             if (parent.Config.IgnoreWaitingDuringDistributionAddition)
@@ -355,7 +562,6 @@ namespace SA_ILP
                 newDist = new Gamma(left.Shape + right.Shape, right.Rate);
             else
             {
-
                 //MMM approximation
 
                 double mu = left.Shape * left.Scale + right.Shape * right.Scale;
@@ -408,7 +614,6 @@ namespace SA_ILP
             return new Gamma(finalAlpha, 1 / finalBeta);
 
         }
-
         private Normal AddNormalDistributions(Normal left, Normal right, double diffWithLowerTimeWindow)
         {
             var standardNormal = new Normal(0, 1);
@@ -460,8 +665,6 @@ namespace SA_ILP
 
             //throw new NotImplementedException();
         }
-
-
         private IContinuousDistribution AddDistributionsStochastic(IContinuousDistribution left, IContinuousDistribution right, double diffWithLowerTimeWindow = -1)
         {
 
@@ -476,23 +679,17 @@ namespace SA_ILP
 
 
         }
-
         private IContinuousDistribution AddDistributionsDeterministic(IContinuousDistribution left, IContinuousDistribution right, double diffWithLowerTimeWindow = -1)
         {
             return left;
         }
-
-        //Calculate the total objective value of this route
         public double CalcObjective()
         {
-
-
             double totalObjectiveValue = 0;
             double totalWeight = used_capacity;
             double arrivalTime = startTime;
 
-
-            IContinuousDistribution total = parent.Config.DefaultDistribution;
+            IContinuousDistribution totalDistribution = parent.Config.DefaultDistribution;
             for (int i = 0; i < route.Count - 1; i++)
             {
                 (double dist, IContinuousDistribution distribution) = this.CustomerDist(route[i], route[i + 1], totalWeight, false);
@@ -508,8 +705,8 @@ namespace SA_ILP
                 if (parent.Config.UseMeanOfDistributionForScore)
                     totalObjectiveValue += distribution.Mean;
 
-                total = AddDistributions(total, distribution, route[i + 1].TWStart - arrivalTime);
-                totalObjectiveValue += CalculateUncertaintyPenaltyTerm(total, route[i + 1], arrivalTime);
+                totalDistribution = AddDistributions(totalDistribution, distribution, route[i + 1].TWStart - arrivalTime);
+                totalObjectiveValue += CalculateUncertaintyPenaltyTerm(totalDistribution, route[i + 1], arrivalTime);
                 if (arrivalTime < route[i + 1].TWStart)
                 {
                     if (i != 0)
@@ -531,7 +728,81 @@ namespace SA_ILP
                 totalWeight -= route[i + 1].Demand;
             }
             CachedObjective = totalObjectiveValue;
+            //double KDEObjective = CalcObjectiveKDE([1,1]);
+            //Console.WriteLine(string.Format("The objective value is {0:N2}, while with KDE is {1:N2}", CachedObjective, KDEObjective));
             return totalObjectiveValue;
+        }
+        
+        /// <summary>
+        /// Updates the state variables, i.e. load, clock, objectiveValue 
+        /// after going from currentCustomer to nextCustomer and making the delivery at nextCustomer.
+        /// </summary>
+        /// <param name="currentCustomer"></param>
+        /// <param name="nextCustomer"></param>
+        /// <param name="load"></param>
+        /// <param name="observationNumber"></param>
+        /// <param name="clock"></param>
+        /// <param name="objectiveValue"></param>
+        /// <returns> the updated values</returns>
+        public (double load, double clock, double objectiveValue) GoToNextCustomer(Customer currentCustomer, Customer nextCustomer, double load, int observationNumber, double clock, double objectiveValue, bool finalCalculation = false)
+        {                
+            int loadLevelCurrent = KDEdata.calculateKDELoadLevel(load);
+            int nrObservations = observationMatrix.GetLength(3);
+            double travelTimeObservation = observationMatrix[currentCustomer.Id,nextCustomer.Id, loadLevelCurrent, observationNumber];
+            clock += travelTimeObservation;
+            objectiveValue += travelTimeObservation/nrObservations;
+  
+            if (clock < nextCustomer.TWStart) //if we arrive before start of time window, i.e. we have to wait
+                {
+                    //Console.WriteLine($"arrived too early starting from {currentCustomer.Id}");
+                    if (currentCustomer.Id != 0)
+                    {
+                        //Console.WriteLine("Punished!");
+                        objectiveValue += CalculateEarlyPenaltyTermKDE(clock, nextCustomer.TWStart, parent.Config.WaitingPenalty, finalCalculation:finalCalculation);
+                    }
+                    if (parent.Config.AdjustDeterministicEarlyArrivalToTWStart)
+                        clock = nextCustomer.TWStart;
+                }
+                objectiveValue += CalculateLatePenaltyTermKDE(clock, nextCustomer.TWEnd, parent.Config.LatenessPenalty, finalCalculation:finalCalculation);
+
+            // make the delivery
+            load -= nextCustomer.Demand;
+            clock += nextCustomer.ServiceTime;          
+            
+            return (load, clock, objectiveValue);
+        }
+        /// <summary>
+        /// Uses the KDE framework and input observations to compute the objective value of the route
+        /// </summary>
+        /// <returns></returns>
+        public double CalcObjectiveKDE(bool finalCalculation = false)
+        {
+            //double[,,,] observationMatrix = KDEdata.ObservationsMatrix;
+            double objectiveValue = 0;
+            int nrObservations = observationMatrix.GetLength(3);
+            
+            for (int j=0; j < nrObservations; j++)
+            {
+                // initialization
+                double clock = 0;
+                double load = used_capacity;
+                //Console.WriteLine($"load is {used_capacity}");
+
+                Customer currentCust = route[0];
+                Customer nextCust;
+        
+                for (int i = 0; i < route.Count - 1; i++)//go through route to compute new arrival times
+                {
+                    // select the two customers between we travel
+                    nextCust = route[i+1];
+
+                    (load, clock, objectiveValue) = GoToNextCustomer(currentCust, nextCust, load, j, clock, objectiveValue, finalCalculation:finalCalculation);
+                    currentCust = nextCust;
+                }  
+            }          
+            KDECachedObjective = objectiveValue;
+            
+            return objectiveValue;
         }
         public static long numDistCalls = 0;
         public (double deterministicDistance, IContinuousDistribution dist) CustomerDistWithDistributions(Customer start, Customer finish, double weight, bool provide_actualDistribution = false)
@@ -543,7 +814,6 @@ namespace SA_ILP
             if (ll == loadLevel && weight != 0)
                 loadLevel--;
 
-
             var val = objective_matrix[start.Id, finish.Id, loadLevel];
 
             //True distribution is used during simulation, otherwise use the approximation
@@ -552,39 +822,155 @@ namespace SA_ILP
             else
                 return (val, distributionApproximationMatrix[start.Id, finish.Id, loadLevel]);
         }
-
-
         //Distance function without stochastic parts
         public (double deterministicDistance, IContinuousDistribution dist) CustomerDistNoDistributions(Customer start, Customer finish, double weight, bool provide_actualDistribution = false)
         {
-            double ll = (weight / max_capacity) * numLoadLevels;
-            int loadLevel = (int)ll;
+            int loadLevel =  (int)Math.Min(Math.Max(Math.Ceiling(numLoadLevels * (weight/ max_capacity) - 1) , 0),numLoadLevels-1);
 
-            //The upperbound is inclusive
-            if (ll == loadLevel && weight != 0)
-                loadLevel--;
-
-            var val = objective_matrix[start.Id, finish.Id, loadLevel];
+            double val = 0;
+            try{
+            val = objective_matrix[start.Id, finish.Id, loadLevel];
+            } catch{
+                Console.WriteLine($"Cannot find entry {start.Id},{finish.Id}, {loadLevel}");
+            }
 
             return (val, null);
         }
-
-
         public void ResetCache()
         {
             BestCustomerPos = new Dictionary<int, (int, double)>();
             CustPossibleAtPosCache = new Dictionary<(int, int), (bool, bool, double)>();
             CachedObjective = -1;
         }
+        public void InsertCust(Customer cust, int pos)
+        {
+            this.used_capacity += cust.Demand;
+            if (parent.Config.useKDE)
+            {
+                route.Insert(pos, cust);
+                double weight = this.route.Sum(x => x.Demand);
+                ResetCache();
+                return;
+            }
+            double load = used_capacity;
+            double newCustArrivalTime = 0;
+            ViolatesLowerTimeWindow = false;
+            ViolatesUpperTimeWindow = false;
+            double newArrivalTime = OptimizeStartTime(route, used_capacity, toAdd: cust, pos: pos);
+            startTime = newArrivalTime;
 
+            IContinuousDistribution totalDistribution = parent.Config.DefaultDistribution;
+
+            IContinuousDistribution? newCustDistribution = null;
+            for (int i = 0, actualIndex = 0; i < route.Count; i++, actualIndex++)
+            {
+                if (i == pos)
+                {
+                    if (newArrivalTime < cust.TWStart)
+                    {
+                        if (actualIndex != 1)
+                        {
+                            if (parent.Config.AdjustDeterministicEarlyArrivalToTWStart)
+                                newArrivalTime = cust.TWStart;
+                            ViolatesLowerTimeWindow = true;
+                        }
+                        else if (parent.Config.AdjustDeterministicEarlyArrivalToTWStart)
+                        {
+                            this.startTime = cust.TWStart - newArrivalTime;
+                            arrival_times[0] = startTime;
+                            newArrivalTime = cust.TWStart;
+                        }
+                    }
+                    else if (newArrivalTime > cust.TWEnd)
+                        ViolatesUpperTimeWindow = true;
+
+                    newCustArrivalTime = newArrivalTime;
+                    newCustDistribution = totalDistribution;
+                    load -= cust.Demand;
+
+                    (double dist, IContinuousDistribution distribution) = CustomerDist(cust, route[i], load, false);
+
+                    newArrivalTime += dist + cust.ServiceTime;
+                    totalDistribution = AddDistributions(totalDistribution, distribution, route[i].TWStart - newArrivalTime);
+
+                    if (parent.Config.UseMeanOfDistributionForTravelTime)
+                        newArrivalTime += distribution.Mean;
+
+                    //Take the new customer into account into the route length
+                    actualIndex++;
+
+                }
+
+                if (newArrivalTime < route[i].TWStart)
+                {
+                    if (actualIndex != 1)
+                    {
+                        if (parent.Config.AdjustDeterministicEarlyArrivalToTWStart)
+                            newArrivalTime = route[i].TWStart;
+                        ViolatesLowerTimeWindow = true;
+                    }
+                    else if (parent.Config.AdjustDeterministicEarlyArrivalToTWStart)
+                    {
+                        startTime = route[i].TWStart - newArrivalTime;
+                        arrival_times[0] = startTime;
+                        newArrivalTime = route[i].TWStart;
+                    }
+                }
+                else if (newArrivalTime > route[i].TWEnd)
+                    ViolatesUpperTimeWindow = true;
+                arrival_times[i] = newArrivalTime;
+                if (i != 0)
+                    try{
+                    customerDistributions[i] = totalDistribution;
+                    } catch{
+                        Console.WriteLine($"Index {i} out of bounds for customerDistributions");
+                    }
+                load -= route[i].Demand;
+                if (i != route.Count - 1)
+                {
+                    double time;
+                    Customer nextCust;
+                    //If the next index is the new cust target pos, use the travel time to the new customer
+                    if (i == pos - 1)
+                        nextCust = cust;
+                    else
+                        nextCust = route[i + 1];
+                    (double dist, IContinuousDistribution distribution) = CustomerDist(route[i], nextCust, load, false);
+                    newArrivalTime += dist + route[i].ServiceTime;
+                    totalDistribution = AddDistributions(totalDistribution, distribution, nextCust.TWStart - newArrivalTime);
+                    if (parent.Config.UseMeanOfDistributionForTravelTime)
+                        newArrivalTime += distribution.Mean;
+                }
+
+                //}
+
+            }
+            arrival_times.Insert(pos, newCustArrivalTime);
+            route.Insert(pos, cust);
+            customerDistributions.Insert(pos, newCustDistribution);
+            ResetCache();
+        }
         public void RemoveCust(Customer cust)
         {
+            int index = -1;
+            if (parent.Config.useKDE)
+            {
+                for (int i = 1; i < route.Count; i++)
+                {
+                    if (route[i].Id == cust.Id)
+                        index = i;
+                }
+                this.used_capacity -= cust.Demand;
+                route.RemoveAt(index);
+                ResetCache();
+                return;
+            }
 
             ViolatesUpperTimeWindow = false;
             ViolatesLowerTimeWindow = false;
 
             arrival_times[0] = 0;
-            int index = -1;
+            
             Customer lastCust = null;
             Customer previous_cust = route[0];
             this.used_capacity -= cust.Demand;
@@ -624,17 +1010,15 @@ namespace SA_ILP
                         }
                     }
 
-
-
                     if (newArriveTime > c.TWEnd)
                         ViolatesUpperTimeWindow = true;
-
+                    try{
                     customerDistributions[i] = total;
+                    } catch{
+                        Console.WriteLine($"customerDistributions[{i}] does not exist for route with length {this.route.GetType}");
+                    }
                     arrival_times[i] = newArriveTime;
                     newArriveTime += c.ServiceTime;
-
-
-
 
                     lastCust = c;
                     previous_cust = c;
@@ -647,20 +1031,27 @@ namespace SA_ILP
             }
             if (index == -1)
                 Console.WriteLine("Helpt");
+                
             route.RemoveAt(index);
             arrival_times.RemoveAt(index);
+            try{
             customerDistributions.RemoveAt(index);
+            }catch{
+                Console.WriteLine($"Cannot remove distribution at index {index}.");
+            }
             ResetCache();
-
         }
-
         public (bool possible, double decrease) CanSwapInternally(Customer cust1, Customer cust2, int index1, int index2)
         {
+            if (parent.Config.useKDE)
+            {
+                return CanSwapInternallyKDE(cust1, cust2, index1, index2);
+            }
             double load = used_capacity;
             double arrival_time = OptimizeStartTime(route, load, swapIndex1: index1, swapIndex2: index2);
             double objectiveValue = 0;
 
-            IContinuousDistribution total = parent.Config.DefaultDistribution;
+            IContinuousDistribution totalDistribution = parent.Config.DefaultDistribution;
 
             for (int i = 0; i < route.Count - 1; i++)
             {
@@ -701,13 +1092,13 @@ namespace SA_ILP
                 load -= nextCust.Demand;
                 objectiveValue += dist;
                 arrival_time += dist + currentCust.ServiceTime;
-                total = AddDistributions(total, distribution, nextCust.TWStart - arrival_time);
+                totalDistribution = AddDistributions(totalDistribution, distribution, nextCust.TWStart - arrival_time);
                 if (parent.Config.UseMeanOfDistributionForTravelTime)
                     arrival_time += distribution.Mean;
                 if (parent.Config.UseMeanOfDistributionForScore)
                     objectiveValue += distribution.Mean;
 
-                objectiveValue += CalculateUncertaintyPenaltyTerm(total, nextCust, arrival_time);
+                objectiveValue += CalculateUncertaintyPenaltyTerm(totalDistribution, nextCust, arrival_time);
                 if (arrival_time > nextCust.TWEnd)
                     if (parent.Config.AllowLateArrivalDuringSearch)
                         objectiveValue += CalculateLatePenaltyTerm(arrival_time, nextCust.TWEnd);
@@ -715,18 +1106,55 @@ namespace SA_ILP
                         return (false, double.MinValue);
 
             }
+            return (true, objectiveValue - this.Score);
+        }
+        /// <summary>
+        /// Checks whether cust1 and cust2 can be swapped within the current route
+        /// </summary>
+        /// <param name="cust1"></param>
+        /// <param name="cust2"></param>
+        /// <param name="index1"></param>
+        /// <param name="index2"></param>
+        /// <returns> negative of improvement (hence decrease)</returns>
+        public (bool possible, double decrease) CanSwapInternallyKDE(Customer cust1, Customer cust2, int index1, int index2)
+        {
+            double objectiveValue = 0;
+            int nrObservations = observationMatrix.GetLength(3);
+            for (int j =0; j<nrObservations; j++)
+            {
+                // reset parameters for each cycle through the route
+                double load = used_capacity;
+                double clock = 0;
+                // clock = OptimizeStartTime(route, load, swapIndex1: index1, swapIndex2: index2);
+                Customer currentCust = route[0];
+                Customer nextCust;
+            
+            for (int i = 0; i < route.Count - 1; i++)
+            {
+                if (i == index1 - 1)
+                    nextCust = cust2;
+                else if (i == index2 - 1)
+                    nextCust = cust1;
+                else
+                    nextCust = route[i + 1];
 
-
+                (load, clock, objectiveValue) = GoToNextCustomer(currentCust, nextCust, load, j, clock, objectiveValue);
+                
+                currentCust = nextCust;
+            }
+            }
+            //Console.WriteLine($"CanSwapInternallyKDE finds {Math.Round(objectiveValue,2)}, score was {this.Score}");
+            //Console.WriteLine($"this.score = {this.Score} while recomputing gets {this.CalcObjectiveKDE()}");
             return (true, objectiveValue - this.Score);
         }
 
-
-
         public (bool possible, bool possibleInLaterPosition, double objectiveIncrease) CustPossibleAtPos(Customer cust, int pos, int skip = 0, int ignore = -1)
         {
-            double totalObjectiveValue = 0;
+            if (parent.Config.useKDE)
+            {
+                return CustPossibleAtPosKDE2(cust, pos, skip, ignore);
+            }
             double load = used_capacity + cust.Demand;
-
             //Remove the demand of the removed customers from the inital load
             for (int i = 0; i < skip; i++)
             {
@@ -736,21 +1164,21 @@ namespace SA_ILP
             if (ignore != -1)
                 load -= route[ignore].Demand;
 
-
-
             //Need to check capacity, otherwise loadlevel claculation fails
             if (load > max_capacity)
             {
                 //CustPossibleAtPosCache[(cust.Id, pos)] = (false, false, double.MinValue);
-                return (false, false, double.MinValue);
+                return (false, false, double.MaxValue);
             }
-
+            
+            double totalObjectiveValue = 0;
             //int actualIndex = 0;
-            IContinuousDistribution total = parent.Config.DefaultDistribution;
+            IContinuousDistribution totalDistribution = parent.Config.DefaultDistribution;
             double arrivalTime = OptimizeStartTime(route, load, toAdd: cust, pos: pos, skip: skip, ignore: ignore);
+
+            // i here is used as index for the customer at who we arrive
             for (int i = 0, actualIndex = 0; i < route.Count; i++, actualIndex++)
             {
-
                 //Arrived at the insert position. Include the new Customer into the check
                 if (i == pos)
                 {
@@ -761,8 +1189,6 @@ namespace SA_ILP
                             totalObjectiveValue += CalculateLatePenaltyTerm(arrivalTime, cust.TWEnd);
                         else
                             return (false, false, double.MinValue);
-
-
                     }
 
                     //Wait for the timewindow start
@@ -779,15 +1205,10 @@ namespace SA_ILP
                             arrivalTime = cust.TWStart;
                         }
 
-                        //For testing not allowing wait
-                        //return (false,true,double.MinValue);
-                        //totalTravelTime += penalty;
-
                     }
 
                     load -= cust.Demand;
                     (var time, IContinuousDistribution distribution) = CustomerDist(cust, route[i + skip], load, false);
-
 
                     totalObjectiveValue += time;
                     arrivalTime += time + cust.ServiceTime;
@@ -797,8 +1218,8 @@ namespace SA_ILP
                     if (parent.Config.UseMeanOfDistributionForScore)
                         totalObjectiveValue += distribution.Mean;
 
-                    total = AddDistributions(total, distribution, route[i + skip].TWStart - arrivalTime);
-                    totalObjectiveValue += CalculateUncertaintyPenaltyTerm(total, route[i + skip], arrivalTime);
+                    totalDistribution= AddDistributions(totalDistribution, distribution, route[i + skip].TWStart - arrivalTime);
+                    totalObjectiveValue += CalculateUncertaintyPenaltyTerm(totalDistribution, route[i + skip], arrivalTime);
 
                     i += skip;
 
@@ -817,7 +1238,6 @@ namespace SA_ILP
                             totalObjectiveValue += CalculateLatePenaltyTerm(arrivalTime, route[i].TWEnd);
                         else
                             return (false, false, double.MinValue);
-
                     }
                     else
                     {
@@ -840,7 +1260,6 @@ namespace SA_ILP
                     {
                         arrivalTime = route[i].TWStart;
                     }
-
                 }
                 load -= route[i].Demand;
 
@@ -866,17 +1285,252 @@ namespace SA_ILP
                     if (parent.Config.UseMeanOfDistributionForScore)
                         totalObjectiveValue += distribution.Mean;
 
-                    total = AddDistributions(total, distribution, nextCust.TWStart - arrivalTime);
-                    totalObjectiveValue += CalculateUncertaintyPenaltyTerm(total, nextCust, arrivalTime);
-
+                    totalDistribution = AddDistributions(totalDistribution, distribution, nextCust.TWStart - arrivalTime);
+                    totalObjectiveValue += CalculateUncertaintyPenaltyTerm(totalDistribution, nextCust, arrivalTime);
                 }
-
             }
 
             return (true, true, totalObjectiveValue - this.Score);
-
         }
+        public (bool possible, bool possibleInLaterPosition, double objectiveIncrease) CustPossibleAtPosKDE(Customer customerToBeAdded, int pos, int skip = 0, int ignore = -1)
+        {
+            double startLoad = used_capacity + customerToBeAdded.Demand;
+            //Remove the demand of the removed customers from the inital load
+            for (int i = 0; i < skip; i++)
+                startLoad -= route[pos + i].Demand;
 
+            if (ignore != -1)
+                startLoad -= route[ignore].Demand;
+
+            //Need to check capacity, otherwise loadlevel claculation fails
+            if (startLoad > max_capacity)
+            {
+                //CustPossibleAtPosCache[(cust.Id, pos)] = (false, false, double.MinValue);
+                return (false, false, double.MaxValue);
+            }
+            
+            // initialization
+            double objectiveValue = 0;
+            for (int j = 0; j< observationMatrix.GetLength(3); j++)
+            {
+                //reset the these parameters for each loop through the
+                double load = startLoad;
+                double clock = 0;
+                
+            for (int i = 0, actualIndex = 0; i < route.Count; i++, actualIndex++)
+            {
+                // at the beginning of the loop i represents the customer at which we arrived
+                // and the clock has the value of the time at which we arrive there 
+                // for i=0 we have clock=0, since we do not 'arrive' at the depot
+                // actualIndex represents at what point in the route we are.
+                
+                //Arrived at the insert position. Include the new Customer into the check
+                if (i == pos)
+                {
+                    if (clock < customerToBeAdded.TWStart)
+                    // early arrival
+                    {
+                        if (actualIndex != 1)
+                        {
+                            objectiveValue += CalculateEarlyPenaltyTermKDE(clock, customerToBeAdded.TWStart, parent.Config.WaitingPenalty);
+                        }
+                        if (parent.Config.AdjustDeterministicEarlyArrivalToTWStart)
+                        {
+                            clock = customerToBeAdded.TWStart;
+                        }
+                    }
+                    else if (clock > customerToBeAdded.TWEnd && !parent.Config.AllowLateArrivalDuringSearch)
+                        return (false, false, double.MaxValue);       
+                    
+                    objectiveValue += CalculateLatePenaltyTermKDE(clock, customerToBeAdded.TWEnd, parent.Config.LatenessPenalty);
+
+                    int ll = KDEdata.calculateKDELoadLevel(load);
+                    var travelTime = observationMatrix[customerToBeAdded.Id, route[i+skip].Id, ll, j];
+                    objectiveValue += travelTime/observationMatrix.GetLength(3);
+
+                    // make the delivery
+                    load -= customerToBeAdded.Demand;
+                    clock += travelTime + customerToBeAdded.ServiceTime;
+                    i += skip;
+
+                    //We visited the cust so the index in the new route should be increased.
+                    actualIndex += 1;
+                }
+
+                if (i == ignore)
+                    i += 1;
+
+                if (clock > route[i].TWEnd && (!parent.Config.AllowLateArrival))
+                {
+                    if (i < pos)
+                        return (false, false, double.MaxValue);
+                    else
+                        return (false, true, double.MaxValue);
+                }
+                //Wait for the timewindow start
+                else if (clock < route[i].TWStart)
+                {
+                    if (actualIndex != 1)
+                    {
+                        objectiveValue += CalculateEarlyPenaltyTermKDE(clock, route[i].TWStart, parent.Config.WaitingPenalty);
+                        if (parent.Config.AdjustDeterministicEarlyArrivalToTWStart)
+                            clock = route[i].TWStart;
+                    }
+                    else if (parent.Config.AdjustDeterministicEarlyArrivalToTWStart)
+                    {
+                        clock = route[i].TWStart;
+                    }
+                }
+                objectiveValue += CalculateLatePenaltyTermKDE(clock, route[i].TWEnd, parent.Config.LatenessPenalty);
+                
+                // make the delivery
+                load -= route[i].Demand;
+                clock += route[i].ServiceTime;
+
+                if (i != route.Count - 1)
+                {
+                    Customer nextCust;
+                    //If the current customer is the customer before the potential position of the new customer update the time accordingly
+                    if (i == pos - 1)
+                        nextCust = customerToBeAdded;
+                    else if (i == ignore - 1)
+                        nextCust = route[i + 2];
+                    else
+                        nextCust = route[i + 1];
+
+                    int ll = KDEdata.calculateKDELoadLevel(load);
+                    var travelTime = observationMatrix[route[i].Id, nextCust.Id, ll, j];
+
+                    objectiveValue += travelTime/observationMatrix.GetLength(3);
+                    clock += travelTime;
+                }
+            }
+            // end of one cycle through route
+            }
+            // end of cycling through all rounds
+
+            return (true, true, objectiveValue - this.Score);
+        }
+        /// <summary>
+        /// A simplified adaptation of the 'CustPossibleAtPos' function. 
+        /// Check whether the customer 'customerToBeAdded' is possible at the position 'pos'.
+        /// Skip and ignore are used when ????
+        /// </summary>
+        /// <param name="customerToBeAdded"></param>
+        /// <param name="pos"></param>
+        /// <param name="skip"></param>
+        /// <param name="ignore"></param>
+        /// <returns></returns>
+        public (bool possible, bool possibleInLaterPosition, double objectiveIncrease) CustPossibleAtPosKDE2(Customer customerToBeAdded, int pos, int skip = 0, int ignore = -1)
+        {
+            double startLoad = used_capacity + customerToBeAdded.Demand;
+            //Remove the demand of the removed customers from the inital load
+            for (int i = 0; i < skip; i++)
+                startLoad -= route[pos + i].Demand;
+
+            if (ignore != -1)
+                startLoad -= route[ignore].Demand;
+
+            //Need to check capacity, otherwise loadlevel claculation fails
+            if (startLoad > max_capacity)
+            {
+                //CustPossibleAtPosCache[(cust.Id, pos)] = (false, false, double.MinValue);
+                return (false, false, double.MaxValue);
+            }
+            
+            // initialization
+            double objectiveValue = 0;
+            for (int j = 0; j< observationMatrix.GetLength(3); j++)
+            {
+                //Console.WriteLine($"CustPossibleAtPosKDE2 finds nrobservatins = {observationMatrix.GetLength(3)}");
+                //reset the these parameters for each loop through the
+                double load = startLoad;
+                double clock = 0;
+                Customer currentCustomer = route[0];
+                Customer nextCustomer;
+                
+            for (int i = 0; i < route.Count-skip; i++)
+            {
+                if (i == ignore-1)
+                    continue;
+                else if (i==pos-1)
+                    nextCustomer = customerToBeAdded;
+                else if (i < pos)
+                    nextCustomer = route[i+1];
+                else 
+                    nextCustomer = route[i + skip];
+                
+                //if (skip==1)
+                    //Console.WriteLine($"skip:{skip}::CC:{currentCustomer.Id}, NC:{nextCustomer.Id}, load:{load}, clock:{clock}, OV:{objectiveValue}");
+                (load, clock, objectiveValue) = GoToNextCustomer(currentCustomer, nextCustomer, load, j, clock, objectiveValue);
+                //Console.WriteLine($"load: {load}, clock:{clock}, OV: {objectiveValue}");
+                currentCustomer = nextCustomer;
+                //Console.WriteLine($"Customer {nextCustomer.Id}");
+            }
+            // end of one cycle through route
+            }
+            // end of cycling through all rounds
+
+            return (true, true, objectiveValue - this.Score);
+        }
+        /// <summary>
+        /// Checks whether customer1 can be placed before customer2, while also giving the corresponding improvement. 
+        /// Function is called when 'MoveRandomCustomerToRandomCustomer' wants to move within the same route.
+        /// If the useKDE boolean is false is uses the 'CustPossibleBeforeOther' function. 
+        /// Otherwise it loops over the observations sets and computes the expected objective value for the route after putting customer1 before customer2.
+        /// </summary>
+        /// <param name="customer1"></param>
+        /// <param name="index1"></param>
+        /// <param name="customer2"></param>
+        /// <param name="index2"></param>
+        /// <returns></returns>
+        public (bool possible, double improvement) CustPossibleBeforeOther(Customer customer1, int index1, Customer customer2, int index2)
+        { 
+            if (!parent.Config.useKDE)
+                {
+                    bool possible; double objectiveIncrease;
+                    (possible, _, objectiveIncrease) = CustPossibleAtPos(customer1, index2, ignore: index1);                       
+                    return (possible, objectiveIncrease);
+                }
+            // initialization
+            double objectiveValue = 0;
+            
+            for (int j = 0; j< observationMatrix.GetLength(3); j++)
+            {
+                //reset the these parameters for each loop through the
+                double load = this.used_capacity;
+                double clock = 0;
+                
+                Customer currentCustomer = route[0];
+                Customer nextCustomer;
+                
+                for (int i = 0; i < route.Count-1; i++)
+                {
+                    // we know that index2 < index1
+                    if (i < index2-1)
+                        nextCustomer = route[i+1];
+                    else if (i==index2-1)
+                        nextCustomer = customer1;
+                    else if (i == index2)
+                        nextCustomer = customer2;
+                    else if (i <= index1-1)
+                        nextCustomer = route[i];
+                    else //if (i > index1-1)
+                        nextCustomer = route[i + 1];
+                    
+                    //if (skip==1)
+                        //Console.WriteLine($"skip:{skip}::CC:{currentCustomer.Id}, NC:{nextCustomer.Id}, load:{load}, clock:{clock}, OV:{objectiveValue}");
+                    (load, clock, objectiveValue) = GoToNextCustomer(currentCustomer, nextCustomer, load, j, clock, objectiveValue);
+                    //Console.WriteLine($"load: {load}, clock:{clock}, OV: {objectiveValue}");
+                    currentCustomer = nextCustomer;
+                    //Console.WriteLine($"Customer {nextCustomer.Id}");
+                }
+            // end of one cycle through route
+            }
+            // end of cycling through all rounds
+            double improvement = this.Score - objectiveValue;
+            return (true, -improvement);
+        }
         public (int, double) BestPossibleInsert(Customer cust)
         {
             double bestDistIncr = double.MaxValue;
@@ -887,6 +1541,7 @@ namespace SA_ILP
             int bestIndex = -1;
             if (this.used_capacity + cust.Demand > max_capacity)
                 return (bestIndex, bestDistIncr);
+            
             for (int i = 1; i < route.Count; i++)
             {
                 (bool possible, bool everPossible, double distIncrease) = CustPossibleAtPos(cust, i);
@@ -898,25 +1553,9 @@ namespace SA_ILP
                         bestDistIncr = distIncrease;
                         bestIndex = i;
                     }
-
-
             }
             BestCustomerPos[cust.Id] = (bestIndex, bestDistIncr);
             return (bestIndex, bestDistIncr);
-        }
-
-        public void ReverseSubRoute(int index1, int index2, List<double> newArrivalTimes, List<IContinuousDistribution> newDistributions, bool violatesLowerTimewindow, bool violatesUpperTimeWindow)
-        {
-
-            //Invalidate the cache
-
-            this.startTime = newArrivalTimes[0];
-            this.arrival_times = newArrivalTimes;
-            this.customerDistributions = newDistributions;
-            this.ViolatesLowerTimeWindow = violatesLowerTimewindow;
-            this.ViolatesUpperTimeWindow = violatesUpperTimeWindow;
-            this.route.Reverse(index1, index2 - index1 + 1);
-            ResetCache();
         }
 
         bool lastOptimizationFailed = false;
@@ -940,7 +1579,6 @@ namespace SA_ILP
 
             for (int i = 0; i < toOptimizeOver.Count; i++)
             {
-
                 if (i == ignore)
                     i++;
                 currentCust = toOptimizeOver[i];
@@ -963,8 +1601,7 @@ namespace SA_ILP
 
                     if (parent.Config.UseMeanOfDistributionForTravelTime)
                         val += distribution.Mean;
-
-
+                        
                 }
                 else if (i == swapIndex1)
                     currentCust = toOptimizeOver[swapIndex2];
@@ -1020,8 +1657,7 @@ namespace SA_ILP
             return arrivalTime;
         }
 
-
-        //Using the function is quite a bit slower than using specifically made functions, but is definatly a possibility.
+        //Using the function is quite a bit slower than using specifically made functions, but is definetly a possibility.
         //It can therefore be used to test new operators for example
         public (bool possible, double improvement, List<double> newArrivalTimes, List<IContinuousDistribution> newDistributions, bool, bool) NewRoutePossible(List<Customer> newRoute, double changedCapacity)
         {
@@ -1029,6 +1665,12 @@ namespace SA_ILP
 
             if (load > max_capacity)
                 return (false, double.MinValue, null, null, false, false);
+
+            if (parent.Config.useKDE)
+            {
+                this.used_capacity = load;
+                return NewRoutePossibleKDE(newRoute);
+            }
 
             double arrivalTime = 0;
             double newObjectiveValue = 0;
@@ -1043,20 +1685,20 @@ namespace SA_ILP
             //Adding the arrival time for the depot. This is used for setting the start time of the route.
             newArrivalTimes.Add(arrivalTime);
             newDistributions.Add(null);
-            IContinuousDistribution total = parent.Config.DefaultDistribution;
+            IContinuousDistribution totalDistribution = parent.Config.DefaultDistribution;
             for (int i = 0; i < newRoute.Count - 1; i++)
             {
                 (var dist, IContinuousDistribution distribution) = CustomerDist(newRoute[i], newRoute[i + 1], load, false);
 
                 arrivalTime += dist + newRoute[i].ServiceTime;
-                total = AddDistributions(total, distribution, newRoute[i + 1].TWStart - arrivalTime);
+                totalDistribution = AddDistributions(totalDistribution, distribution, newRoute[i + 1].TWStart - arrivalTime);
 
                 if (parent.Config.UseMeanOfDistributionForTravelTime)
                     arrivalTime += distribution.Mean;
                 if (parent.Config.UseMeanOfDistributionForScore)
                     newObjectiveValue += distribution.Mean;
                 newObjectiveValue += dist;
-                newObjectiveValue += CalculateUncertaintyPenaltyTerm(total, newRoute[i + 1], arrivalTime);
+                newObjectiveValue += CalculateUncertaintyPenaltyTerm(totalDistribution, newRoute[i + 1], arrivalTime);
                 if (arrivalTime < newRoute[i + 1].TWStart)
                 {
                     if (i != 0)
@@ -1092,18 +1734,51 @@ namespace SA_ILP
 
                 load -= newRoute[i + 1].Demand;
                 newArrivalTimes.Add(arrivalTime);
-                newDistributions.Add(total);
+                newDistributions.Add(totalDistribution);
 
             }
             return (true, this.Score - newObjectiveValue, newArrivalTimes, newDistributions, violatesLowerTimeWindow, violatesUpperTimeWindow);
         }
+        /// <summary>
+        /// This function is not yet correctly implemented. Now always returns true and the improvement.
+        /// </summary>
+        /// <param name="newRoute"></param>
+        /// <returns></returns>
+        public (bool possible, double improvement, List<double> newArrivalTimes, List<IContinuousDistribution> newDistributions, bool, bool) NewRoutePossibleKDE(List<Customer> newRoute)
+        {
+            bool violatesLowerTimeWindow = false;
+            bool violatesUpperTimeWindow = false; 
+            
+            double load;   
+            double objectiveValue = 0;
+            int nrObservations = observationMatrix.GetLength(3);
+
+            for (int j=0; j<nrObservations; j++)
+            {
+                // Initialization for the route
+                load = used_capacity;
+                double clock = 0;
+                
+                for (int i = 0; i < newRoute.Count - 1; i++)
+                {
+                    Customer currentCustomer = newRoute[i];
+                    Customer nextCustomer = newRoute[i+1];
+
+                    (load, clock, objectiveValue) = GoToNextCustomer(currentCustomer, nextCustomer, load, j, clock, objectiveValue);
+                }
+            }
+            return (true, this.Score - objectiveValue, null, null, violatesLowerTimeWindow, violatesUpperTimeWindow);
+        }
 
         public void SetNewRoute(List<Customer> customers, List<double> arrivalTimes, List<IContinuousDistribution> newDistributions, bool violatesLowerTimeWindow, bool violatesUpperTimeWindow)
         {
+            if (!parent.Config.useKDE)
+            {
+                this.arrival_times = arrivalTimes;
+                this.startTime = arrivalTimes[0];
+                this.customerDistributions = newDistributions;
+            }
             this.route = customers;
-            this.arrival_times = arrivalTimes;
-            this.startTime = arrivalTimes[0];
-            this.customerDistributions = newDistributions;
             this.ViolatesLowerTimeWindow = violatesLowerTimeWindow;
             this.ViolatesUpperTimeWindow = violatesUpperTimeWindow;
             this.used_capacity = customers.Sum(x => x.Demand);
@@ -1112,6 +1787,10 @@ namespace SA_ILP
 
         public (bool possible, double improvement, List<double> newArrivalTimes, List<IContinuousDistribution> newDistributions, bool violatesLowerTimeWindow, bool violatesUpperTimeWindow) CanReverseSubRoute(int index1, int index2)
         {
+            if (parent.Config.useKDE)
+            {
+                return CanReverseSubRouteKDE(index1,index2);
+            }
             double load = used_capacity;
             double arrival_time = OptimizeStartTime(route, load, reverseIndex1: index1, reverseIndex2: index2);
             double newObjectiveValue = 0;
@@ -1121,7 +1800,7 @@ namespace SA_ILP
 
             List<double> newArrivalTimes = new List<double>(route.Count) { arrival_time };
             List<IContinuousDistribution> newDistributions = new List<IContinuousDistribution>(route.Count) { null };
-            IContinuousDistribution total = parent.Config.DefaultDistribution;
+            IContinuousDistribution totalDistribution = parent.Config.DefaultDistribution;
             //Check if the action would be possible and calculate the new objective score
             for (int i = 0; i < route.Count - 1; i++)
             {
@@ -1148,29 +1827,21 @@ namespace SA_ILP
                     nextCust = route[i + 1];
                 }
 
-
-
-
-
-
                 //Travel time to new customer
                 (double dist, IContinuousDistribution distribution) = CustomerDist(currentCust, nextCust, load, false);
-
-
-
 
                 //Add travel time to total cost
                 newObjectiveValue += dist;
 
                 //Update arrival time for next customer
                 arrival_time += dist + currentCust.ServiceTime;
-                total = AddDistributions(total, distribution, nextCust.TWStart - arrival_time);
+                totalDistribution = AddDistributions(totalDistribution, distribution, nextCust.TWStart - arrival_time);
                 if (parent.Config.UseMeanOfDistributionForTravelTime)
                     arrival_time += distribution.Mean;
                 if (parent.Config.UseMeanOfDistributionForScore)
                     newObjectiveValue += distribution.Mean;
 
-                newObjectiveValue += CalculateUncertaintyPenaltyTerm(total, nextCust, arrival_time);
+                newObjectiveValue += CalculateUncertaintyPenaltyTerm(totalDistribution, nextCust, arrival_time);
 
                 if (arrival_time < nextCust.TWStart)
                 {
@@ -1189,7 +1860,7 @@ namespace SA_ILP
                 }
 
                 newArrivalTimes.Add(arrival_time);
-                newDistributions.Add(total);
+                newDistributions.Add(totalDistribution);
                 //Check the timewindow end of the next customer
                 if (arrival_time > nextCust.TWEnd)
                     if (parent.Config.AllowLateArrivalDuringSearch)
@@ -1202,22 +1873,126 @@ namespace SA_ILP
 
                 //After traveling to the next customer we can remove it's load
                 load -= nextCust.Demand;
-
             }
 
             return (true, this.Score - newObjectiveValue, newArrivalTimes, newDistributions, violatesLowerTimeWindow, violatesUpperTimeWindow);
+        }
+        /// <summary>
+        /// KDE version of the original function.
+        /// Outputs 'newArrivalTimes' and 'newDistributions' are only necessary for fitting with the rest of the code 
+        /// and do not represent any usefull information.
+        /// </summary>
+        /// <param name="index1"></param>
+        /// <param name="index2"></param>
+        /// <returns></returns>
+        public (bool possible, double improvement, List<double> newArrivalTimes, List<IContinuousDistribution> newDistributions, bool violatesLowerTimeWindow, bool violatesUpperTimeWindow) CanReverseSubRouteKDE(int index1, int index2)
+        {
+            // this is the KDE variant
+            double load;
+            double startTime = 0;
+            //startTime = OptimizeStartTime(route, load, reverseIndex1: index1, reverseIndex2: index2);
+            double objectiveValue = 0;
+            int nrObservations = observationMatrix.GetLength(3);
+
+            bool violatesLowerTimeWindow = false;
+            bool violatesUpperTimeWindow = false;
+
+            //Check if the action would be possible and calculate the new objective score
+            for (int j=0 ; j<nrObservations; j++){
+                
+                // reset of parameters
+                load = used_capacity;
+                double clock = startTime;
+            
+            for (int i = 0; i < route.Count - 1; i++)
+            {
+                Customer currentCust;
+                Customer nextCust;
+                if (i >= index1 && i <= index2)
+                {
+                    //In the to be reversed subroute, select in reversed order
+                    currentCust = route[index2 - i + index1];
+                    if (i < index2)
+                        nextCust = route[index2 - i + index1 - 1];
+                    else
+                        nextCust = route[i + 1];
+                }
+                else if (i == index1 - 1)
+                {
+                    nextCust = route[index2];
+                    currentCust = route[i];
+                }
+                else
+                {
+                    currentCust = route[i];
+                    nextCust = route[i + 1];
+                }
+                
+                //Add travel time to total cost 
+                int ll = KDEdata.calculateKDELoadLevel(load);
+                double travelTime = observationMatrix[currentCust.Id, nextCust.Id, ll, j];
+                
+                clock += travelTime;
+                objectiveValue += travelTime/nrObservations;
+
+                if (clock < nextCust.TWStart) //early arrival
+                {
+                    if (i != 0)
+                    {
+                        objectiveValue += CalculateEarlyPenaltyTermKDE(clock, nextCust.TWStart, parent.Config.WaitingPenalty);
+                        violatesLowerTimeWindow = true;
+                    }
+                    if (parent.Config.AdjustDeterministicEarlyArrivalToTWStart)
+                    {
+                        clock = nextCust.TWStart;
+                    }
+                }
+                else if (clock > nextCust.TWEnd) //late arrival
+                {
+                    violatesUpperTimeWindow = true;
+                    if (!parent.Config.AllowLateArrivalDuringSearch)
+                        return (false, double.MinValue, null, null ,violatesLowerTimeWindow, false); 
+                } 
+                objectiveValue += CalculateLatePenaltyTermKDE(clock, nextCust.TWEnd, parent.Config.LatenessPenalty);
+ 
+                //making the delivery
+                load -= nextCust.Demand;
+                clock += nextCust.ServiceTime;
+            }
+            }
+            //Console.WriteLine($"Reverse Subroute finds {Math.Round(objectiveValue,2)}, while score was {Math.Round(this.Score,2)}.");
+            return (true, this.Score - objectiveValue, null, null, violatesLowerTimeWindow, violatesUpperTimeWindow);
+        }
+        public void ReverseSubRoute(int index1, int index2, List<double> newArrivalTimes, List<IContinuousDistribution> newDistributions, bool violatesLowerTimewindow, bool violatesUpperTimeWindow)
+        {
+            // this is operator "4" as an action
+            //Invalidate the cache
+            if (!parent.Config.useKDE)
+            {
+                this.startTime = newArrivalTimes[0];
+                this.arrival_times = newArrivalTimes;
+                this.customerDistributions = newDistributions;
+            }
+            this.ViolatesLowerTimeWindow = violatesLowerTimewindow;
+            this.ViolatesUpperTimeWindow = violatesUpperTimeWindow;
+            this.route.Reverse(index1, index2 - index1 + 1);
+            ResetCache();
         }
 
         public (Customer? toRemove, double objectiveDecrease, int index) RandomCust()
         {
             if (route.Count == 2)
-                return (null, double.MaxValue, -1);
+                return (null, double.MinValue, -1);
 
+            if (parent.Config.useKDE)
+            {
+                return RandomCustKDE();
+            }
             var i = random.Next(1, route.Count - 1);
             double newObjectiveValue = 0;
             double load = used_capacity - route[i].Demand;
             double arrival_time = OptimizeStartTime(route, load, toRemove: route[i]);
-            IContinuousDistribution total = parent.Config.DefaultDistribution;
+            IContinuousDistribution totalDistribution = parent.Config.DefaultDistribution;
             for (int j = 0, actualIndex = 0; j < route.Count - 1; j++, actualIndex++)
             {
                 double time;
@@ -1239,25 +2014,20 @@ namespace SA_ILP
                 else
                     nextCust = route[j + 1];
 
-
                 (var cost, IContinuousDistribution distribution) = CustomerDist(route[j], nextCust, load, false);
-
 
                 newObjectiveValue += cost;
 
-
-
                 arrival_time += cost + route[j].ServiceTime;
 
-                total = AddDistributions(total, distribution, nextCust.TWStart - arrival_time);
+                totalDistribution = AddDistributions(totalDistribution, distribution, nextCust.TWStart - arrival_time);
 
                 if (parent.Config.UseMeanOfDistributionForTravelTime)
                     arrival_time += distribution.Mean;
                 if (parent.Config.UseMeanOfDistributionForScore)
                     newObjectiveValue += distribution.Mean;
 
-                newObjectiveValue += CalculateUncertaintyPenaltyTerm(total, nextCust, arrival_time);
-
+                newObjectiveValue += CalculateUncertaintyPenaltyTerm(totalDistribution, nextCust, arrival_time);
 
                 if (arrival_time < nextCust.TWStart)
                 {
@@ -1276,8 +2046,70 @@ namespace SA_ILP
                     newObjectiveValue += CalculateLatePenaltyTerm(arrival_time, nextCust.TWEnd);
                 load -= nextCust.Demand;
             }
+            return (route[i], this.Score - newObjectiveValue, i);
+        }
+        /// <summary>
+        /// Picks a random customer and deletes it from the current route. 
+        /// </summary>
+        /// <returns></returns>
+        public (Customer? toRemove, double objectiveDecrease, int index) RandomCustKDE()
+        {
+            var i = random.Next(1, route.Count - 1);
+            
+            double startLoad = used_capacity - route[i].Demand;
+            
+            double newObjectiveValue = 0;
+            double startTime = 0;
+            //startTime = OptimizeStartTime(route, startLoad, toRemove: route[i]);
+            int nrObservations = observationMatrix.GetLength(3);
+            
+            for (int counter=0; counter<nrObservations; counter++)
+            {
+                double load = startLoad;
+                double clock = startTime;
+            for (int j = 0; j < route.Count - 1; j++)
+            {
+                Customer nextCust;
+                //Skip the to be removed customer
+                if (i == j)
+                {
+                    //Skipping the removed customer should not interfere with the actual index
+                    continue;
+                }
 
+                //If the next customer would be the removed customer, skip it.
+                if (j == i - 1)
+                {
+                    nextCust = route[j + 2];
+                }
+                else
+                    nextCust = route[j + 1];
 
+                //Console.WriteLine($"We go from {route[j].Id} to {nextCust.Id}");
+                int ll = KDEdata.calculateKDELoadLevel(load);
+                double travelTime = observationMatrix[route[j].Id, nextCust.Id, ll, counter];
+                newObjectiveValue += travelTime/nrObservations;
+                clock += travelTime;
+
+                // early arrival
+                if (clock < nextCust.TWStart)
+                {
+                    if (j != 0)
+                    {
+                        newObjectiveValue += CalculateEarlyPenaltyTermKDE(clock, nextCust.TWStart,parent.Config.WaitingPenalty);
+                    }
+                    if (parent.Config.AdjustDeterministicEarlyArrivalToTWStart)
+                    {
+                        clock = nextCust.TWStart;
+                    }
+                }
+                // late arrival
+                newObjectiveValue += CalculateLatePenaltyTermKDE(clock, nextCust.TWEnd,parent.Config.LatenessPenalty);
+                // making the delivery
+                load -= nextCust.Demand;
+                clock += nextCust.ServiceTime;
+            }
+            }
             return (route[i], this.Score - newObjectiveValue, i);
         }
 
@@ -1302,134 +2134,26 @@ namespace SA_ILP
             //return Route.Sum(x=>);//String.Join(";", Route).GetHashCode();
         }
 
-        public void InsertCust(Customer cust, int pos)
-        {
-            used_capacity += cust.Demand;
-            double load = used_capacity;
-            double newCustArrivalTime = 0;
-            ViolatesLowerTimeWindow = false;
-            ViolatesUpperTimeWindow = false;
-            double newArrivalTime = OptimizeStartTime(route, used_capacity, toAdd: cust, pos: pos);
-            startTime = newArrivalTime;
-
-            IContinuousDistribution total = parent.Config.DefaultDistribution;
-
-            IContinuousDistribution? newCustDistribution = null;
-            for (int i = 0, actualIndex = 0; i < route.Count; i++, actualIndex++)
-            {
-                if (i == pos)
-                {
-                    if (newArrivalTime < cust.TWStart)
-                    {
-                        if (actualIndex != 1)
-                        {
-                            if (parent.Config.AdjustDeterministicEarlyArrivalToTWStart)
-                                newArrivalTime = cust.TWStart;
-                            ViolatesLowerTimeWindow = true;
-                        }
-                        else if (parent.Config.AdjustDeterministicEarlyArrivalToTWStart)
-                        {
-                            this.startTime = cust.TWStart - newArrivalTime;
-                            arrival_times[0] = startTime;
-                            newArrivalTime = cust.TWStart;
-                        }
-                    }
-                    else if (newArrivalTime > cust.TWEnd)
-                        ViolatesUpperTimeWindow = true;
-
-                    newCustArrivalTime = newArrivalTime;
-                    newCustDistribution = total;
-                    load -= cust.Demand;
-
-                    (double dist, IContinuousDistribution distribution) = CustomerDist(cust, route[i], load, false);
-
-                    newArrivalTime += dist + cust.ServiceTime;
-                    total = AddDistributions(total, distribution, route[i].TWStart - newArrivalTime);
-
-
-
-
-                    if (parent.Config.UseMeanOfDistributionForTravelTime)
-                        newArrivalTime += distribution.Mean;
-
-                    //Take the new customer into account into the route length
-                    actualIndex++;
-
-                }
-
-                if (newArrivalTime < route[i].TWStart)
-                {
-                    if (actualIndex != 1)
-                    {
-                        if (parent.Config.AdjustDeterministicEarlyArrivalToTWStart)
-                            newArrivalTime = route[i].TWStart;
-                        ViolatesLowerTimeWindow = true;
-                    }
-                    else if (parent.Config.AdjustDeterministicEarlyArrivalToTWStart)
-                    {
-                        startTime = route[i].TWStart - newArrivalTime;
-                        arrival_times[0] = startTime;
-                        newArrivalTime = route[i].TWStart;
-                    }
-                }
-                else if (newArrivalTime > route[i].TWEnd)
-                    ViolatesUpperTimeWindow = true;
-                arrival_times[i] = newArrivalTime;
-                if (i != 0)
-                    customerDistributions[i] = total;
-                load -= route[i].Demand;
-                if (i != route.Count - 1)
-                {
-                    double time;
-                    Customer nextCust;
-                    //If the next index is the new cust target pos, use the travel time to the new customer
-                    if (i == pos - 1)
-                        nextCust = cust;
-                    else
-                        nextCust = route[i + 1];
-                    (double dist, IContinuousDistribution distribution) = CustomerDist(route[i], nextCust, load, false);
-                    newArrivalTime += dist + route[i].ServiceTime;
-                    total = AddDistributions(total, distribution, nextCust.TWStart - newArrivalTime);
-                    if (parent.Config.UseMeanOfDistributionForTravelTime)
-                        newArrivalTime += distribution.Mean;
-                }
-
-                //}
-
-            }
-            arrival_times.Insert(pos, newCustArrivalTime);
-            route.Insert(pos, cust);
-
-
-            customerDistributions.Insert(pos, newCustDistribution);
-            ResetCache();
-        }
-
         public (bool, double, int) CanSwapBetweenRoutes(Customer cust1, Customer cust2, int index)
         {
-
             (bool possible, _, double distIncrease) = CustPossibleAtPos(cust2, index, 1);
             possible &= (used_capacity - cust1.Demand + cust2.Demand < max_capacity);
             return (possible, distIncrease, index);
-
         }
-
         //Checks wheter timewindows are met, cached arrival times are correct and if the capacity constraints are not violated.
         //Assumes starting time of planning horizon of 0 and that distance matrix is correct.
         public bool CheckRouteValidity()
         {
-
             double arrivalTime = startTime;
             bool failed = false;
             double usedCapacity = 0;
             double load = route.Sum(x => x.Demand);
-            IContinuousDistribution total = parent.Config.DefaultDistribution;
+            IContinuousDistribution totalDistribution = parent.Config.DefaultDistribution;
             if (load > max_capacity)
             {
                 failed = true;
                 Console.WriteLine($"FAIL exceeded vehicle capacity {route}");
             }
-
 
             for (int i = 0; i < route.Count - 1; i++)
             {
@@ -1439,9 +2163,7 @@ namespace SA_ILP
                 if (parent.Config.UseMeanOfDistributionForTravelTime)
                     arrivalTime += distribution.Mean;
 
-                total = AddDistributions(total, distribution, route[i + 1].TWStart - arrivalTime);
-
-
+                totalDistribution = AddDistributions(totalDistribution, distribution, route[i + 1].TWStart - arrivalTime);
 
                 if (arrivalTime < route[i + 1].TWStart)
                 {
@@ -1474,10 +2196,75 @@ namespace SA_ILP
             }
             return failed;
         }
+        /// <summary>
+        /// Checks whether the current route satisfies all constraints that define the model.
+        /// </summary>
+        /// <returns></returns>
+        public bool CheckRouteValidityKDE()
+        {
+            double startLoad = route.Sum(x => x.Demand);
+            bool failed = false;
+            double nrTooLate = 0;
+            if (startLoad > max_capacity)
+            {
+                failed = true;
+                Console.WriteLine($"FAIL exceeded vehicle capacity {route}");
+                return failed;
+            }
+            else
+            {
+                for (int j = 0; j< observationMatrix.GetLength(3); j++)
+                {
+                    double clock = startTime;
+                    double load = startLoad;
+                    
+                    for (int i = 0; i < route.Count - 1; i++)
+                    {
+                        int ll = KDEdata.calculateKDELoadLevel(load);
+                        double travelTime = observationMatrix[route[i].Id, route[i+1].Id, ll, j];
+                        clock += travelTime;
+
+                        if (clock < route[i + 1].TWStart)
+                        {
+                            if (!parent.Config.AllowDeterministicEarlyArrival && i != 0)
+                            {
+                                failed = true;
+                                Console.WriteLine("FAIL arrived to early at customer");
+                            }
+                            if (parent.Config.AdjustDeterministicEarlyArrivalToTWStart)
+                                clock = route[i + 1].TWStart;
+                        }
+
+                        if (clock > route[i + 1].TWEnd)
+                        {
+                            if (!parent.Config.AllowLateArrival)
+                            {
+                                nrTooLate += 1;
+                                Console.WriteLine($"FAIL did not meet customer {route[i + 1].Id}:{route[i + 1]} due date. Arrived on {clock} on route {route}");
+                            }
+                        }
+                        load -= route[i + 1].Demand;
+                        clock += route[i+1].ServiceTime;
+                    }
+                }
+            }
+            if (nrTooLate/observationMatrix.GetLength(3) <= 0.95)
+                failed = true;
+
+            return failed;
+        }
 
         public Route CreateDeepCopy()
         {
             return new Route(route.ConvertAll(i => i), arrival_times.ConvertAll(i => i), customerDistributions.ConvertAll(i => i), objective_matrix, distributionMatrix, distributionApproximationMatrix, used_capacity, max_capacity, random.Next(), this.parent, startTime);
+        }
+        /// <summary>
+        /// Returns a new instance of the Route class. 
+        /// </summary>
+        /// <returns></returns>
+        public Route CreateDeepCopyKDE()
+        {
+            return new Route(route.ConvertAll(i => i), used_capacity, max_capacity, observationMatrix, random.Next(), this.parent, startTime);
         }
 
         public List<int> CreateIdList()

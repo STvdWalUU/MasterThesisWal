@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net6.0</TargetFramework>
+    <TargetFramework>net8.0</TargetFramework>
     <RootNamespace>SA_ILP</RootNamespace>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
@@ -10,6 +10,7 @@
 
   <ItemGroup>
     <PackageReference Include="CommandLineParser" Version="2.8.0" />
+    <PackageReference Include="Gurobi.Optimizer" Version="11.0.0" />
     <PackageReference Include="MathNet.Numerics" Version="4.15.0" />
     <PackageReference Include="MyPackage" Version="1.0.0" />
   </ItemGroup>

@@ -1,0 +1,10 @@
+The following columns are used in the data sets
+
+0			id of the node
+1	x		x coordinate of the node
+2	y		y coordinate of the node
+3	elevation	elevation of the node
+4	demand		demand of the node
+5	tw a		start of the time window of the node
+6	tw b		end of the time window of the node
+7	s		service time of the node
